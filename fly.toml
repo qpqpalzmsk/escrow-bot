@@ -1,25 +1,23 @@
-app = "escrow-bot"
+# fly.toml app configuration file generated for escrow-bot on 2025-03-09T03:55:27Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-[env]
-  TELEGRAM_API_KEY = "your_telegram_bot_api_key"
-  DATABASE_URL = "postgres://user:password@your-db-host.internal:5432/escrow_db"
-  PRIVATE_KEY = "your_private_key"
+app = 'escrow-bot'
+primary_region = 'sea'
 
-[deploy]
-  release_command = "python bot.py"
+[build]
 
 [http_service]
   internal_port = 8080
   force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
 
-[[services]]
-  internal_port = 8080
-  protocol = "tcp"
-
-  [[services.ports]]
-    handlers = ["http"]
-    port = 80
-
-  [[services.ports]]
-    handlers = ["tls", "http"]
-    port = 443
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 1024
