@@ -350,6 +350,11 @@ async def forward_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             photo = update.message.photo[-1]
             await context.bot.send_photo(chat_partner, photo.file_id, caption="사진을 받았습니다.")
 
+# /exit 명령어 (초기 화면으로 돌아가기)
+async def exit_to_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("초기 화면으로 돌아갑니다. 판매할 물품은 /sell, 구매할 물품은 /list를 입력해주세요.")
+    return ConversationHandler.END
+
 # /cancel 명령어 (자신이 등록한 물품 삭제)
 async def cancel_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
