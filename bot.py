@@ -25,6 +25,7 @@ TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 TRON_API = os.getenv("TRON_API")
+TRON_API_KEY = os.getenv("TRON_API_KEY")
 
 # 수수료 설정
 ESCROW_FEE_PERCENTAGE = Decimal('0.05')  # 5% 중개 수수료
@@ -34,7 +35,7 @@ TRANSFER_FEE = Decimal('1.0')  # 송금 수수료 (TRON 기준)
 tron = Tron()
 SELLER_ADDRESS = "TT8AZ3dCpgWJQSw9EXhhyR3uKj81jXxbRB"
 private_key = PrivateKey(bytes.fromhex(PRIVATE_KEY))
-client = Tron(provider=HTTPProvider(TRON_API))
+client = Tron(provider=HTTPProvider(TRON_API, headers={"TRON-PRO-API-KEY": TRON_API_KEY}))
 
 # 데이터베이스 연결 설정 (PostgreSQL)
 try:
