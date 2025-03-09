@@ -23,8 +23,12 @@ ESCROW_FEE_PERCENTAGE = Decimal('0.05')  # 5% 중개 수수료
 TRANSFER_FEE = Decimal('1.0')  # 송금 수수료 (TRON 기준)
 
 # 데이터베이스 연결 설정 (PostgreSQL)
-engine = create_engine(DATABASE_URL)
-conn = engine.connect()
+try:
+    engine = create_engine(DATABASE_URL)
+    conn = engine.connect()
+    logging.info("데이터베이스 연결 성공")
+except SQLAlchemyError as e:
+    logging.error(f"데이터베이스 연결 오류: {e}")
 
 # 데이터베이스 초기화
 try:
@@ -50,7 +54,7 @@ try:
     '''))
     conn.commit()
 except SQLAlchemyError as e:
-    logging.error(f"Database Initialization Error: {e}")
+    logging.error(f"데이터베이스 초기화 오류: {e}")
 
 # 로깅 설정
 logging.basicConfig(
@@ -84,10 +88,12 @@ async def set_item_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logging.info(f"Received price input: {price_input}")
     
     try:
-        # 가격을 Decimal로 변환
+        # 숫자로만 구성된지 확인
+        if not price_input.replace('.', '', 1).isdigit():
+            raise ValueError("입력 값이 숫자가 아님")
+        
         price = Decimal(price_input)
-        if price <= 0:
-            raise ValueError("가격은 0보다 커야 합니다.")
+        logging.info(f"Converted price: {price}")
 
         item_name = context.user_data.get('item_name')
         seller_id = update.message.from_user.id
@@ -98,41 +104,53 @@ async def set_item_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         await update.message.reply_text(f"'{item_name}'을(를) {price} USDT에 판매 등록하였습니다.")
         return ConversationHandler.END
-
     except (InvalidOperation, ValueError) as e:
         logging.error(f"Error converting price: {e}")
-        await update.message.reply_text(f"유효한 가격을 입력해주세요. 숫자로만 입력해 주세요. 오류: {e}")
+        await update.message.reply_text("유효한 가격을 입력해주세요. 숫자로만 입력해 주세요.")
         return WAITING_FOR_ITEM_PRICE
+    except SQLAlchemyError as e:
+        logging.error(f"데이터베이스 저장 오류: {e}")
+        await update.message.reply_text("데이터베이스 저장 중 오류가 발생했습니다.")
+        return ConversationHandler.END
 
 # /list 명령어 (판매 물품 목록)
 async def list_items(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    items = conn.execute(text('SELECT id, name, price FROM items WHERE status=:status'), {'status': 'available'}).fetchall()
+    try:
+        items = conn.execute(text('SELECT id, name, price FROM items WHERE status=:status'), {'status': 'available'}).fetchall()
 
-    if not items:
-        await update.message.reply_text("판매 중인 물품이 없습니다.")
-        return
+        if not items:
+            await update.message.reply_text("판매 중인 물품이 없습니다.")
+            return
 
-    message = "판매 중인 물품 목록:\n"
-    for item in items:
-        message += f"{item.id}. {item.name} - {item.price} USDT\n"
-    
-    await update.message.reply_text(message)
+        message = "판매 중인 물품 목록:\n"
+        for item in items:
+            message += f"{item.id}. {item.name} - {item.price} USDT\n"
+        
+        await update.message.reply_text(message)
+    except SQLAlchemyError as e:
+        logging.error(f"데이터베이스 조회 오류: {e}")
+        await update.message.reply_text("물품 목록을 가져오는 중 오류가 발생했습니다.")
 
 # /cancel 명령어 (등록 물품 취소)
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     seller_id = update.message.from_user.id
-    items = conn.execute(text('SELECT id, name FROM items WHERE seller_id=:seller_id AND status=:status'),
-                         {'seller_id': seller_id, 'status': 'available'}).fetchall()
+    try:
+        items = conn.execute(text('SELECT id, name FROM items WHERE seller_id=:seller_id AND status=:status'),
+                             {'seller_id': seller_id, 'status': 'available'}).fetchall()
 
-    if not items:
-        await update.message.reply_text("취소할 물품이 없습니다.")
+        if not items:
+            await update.message.reply_text("취소할 물품이 없습니다.")
+            return ConversationHandler.END
+
+        keyboard = [[InlineKeyboardButton(item.name, callback_data=str(item.id))] for item in items]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text('취소할 물품을 선택해주세요.', reply_markup=reply_markup)
+        return WAITING_FOR_CANCEL_SELECTION
+    except SQLAlchemyError as e:
+        logging.error(f"데이터베이스 조회 오류: {e}")
+        await update.message.reply_text("물품을 불러오는 중 오류가 발생했습니다.")
         return ConversationHandler.END
-
-    keyboard = [[InlineKeyboardButton(item.name, callback_data=str(item.id))] for item in items]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text('취소할 물품을 선택해주세요.', reply_markup=reply_markup)
-    return WAITING_FOR_CANCEL_SELECTION
 
 # 물품 취소 처리
 async def confirm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -140,11 +158,16 @@ async def confirm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     item_id = int(query.data)
 
-    conn.execute(text('UPDATE items SET status=:status WHERE id=:id'), {'status': 'cancelled', 'id': item_id})
-    conn.commit()
+    try:
+        conn.execute(text('UPDATE items SET status=:status WHERE id=:id'), {'status': 'cancelled', 'id': item_id})
+        conn.commit()
 
-    await query.edit_message_text(text="선택한 물품을 취소하였습니다.")
-    return ConversationHandler.END
+        await query.edit_message_text(text="선택한 물품을 취소하였습니다.")
+        return ConversationHandler.END
+    except SQLAlchemyError as e:
+        logging.error(f"데이터베이스 업데이트 오류: {e}")
+        await query.edit_message_text(text="물품을 취소하는 중 오류가 발생했습니다.")
+        return ConversationHandler.END
 
 # /ok 명령어 (거래 완료 확인)
 async def confirm_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -163,9 +186,19 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
 
+    cancel_handler = ConversationHandler(
+        entry_points=[CommandHandler('cancel', cancel)],
+        states={
+            WAITING_FOR_CANCEL_SELECTION: [CallbackQueryHandler(confirm_cancel)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("list", list_items))
+    application.add_handler(CommandHandler("ok", confirm_purchase))
     application.add_handler(sell_handler)
+    application.add_handler(cancel_handler)
 
     application.run_polling()
 
