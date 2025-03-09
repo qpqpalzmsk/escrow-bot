@@ -24,6 +24,7 @@ from tronpy.exceptions import TransactionError
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+TRON_API = os.getenv("TRON_API")
 
 # 수수료 설정
 ESCROW_FEE_PERCENTAGE = Decimal('0.05')  # 5% 중개 수수료
