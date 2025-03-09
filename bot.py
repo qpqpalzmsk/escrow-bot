@@ -10,7 +10,8 @@ from telegram.ext import (
     CallbackQueryHandler, 
     MessageHandler, 
     filters, 
-    ContextTypes
+    ContextTypes,
+    ConversationHandler
 )
 import sqlite3
 
@@ -24,7 +25,7 @@ ESCROW_FEE_PERCENTAGE = Decimal('0.05')  # 5% 중개 수수료
 TRANSFER_FEE = Decimal('1.0')  # 송금 수수료 (TRON 기준)
 
 # 데이터베이스 초기화
-conn = sqlite3.connect('escrow.db')
+conn = sqlite3.connect('escrow.db', check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute('''
@@ -57,23 +58,28 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+# 상태 정의
+WAITING_FOR_ITEM_NAME = 1
+WAITING_FOR_ITEM_PRICE = 2
+WAITING_FOR_CANCEL_SELECTION = 3
+
 # /start 명령어
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("안녕하세요! 에스크로 거래 봇입니다. 판매할 물품은 /sell, 구매할 물품은 /list를 입력해주세요.")
 
 # /sell 명령어 (판매 물품 등록)
-async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("판매할 물품의 이름을 입력해주세요.")
-    return "WAITING_FOR_ITEM_NAME"
+    return WAITING_FOR_ITEM_NAME
 
 # 판매 물품 이름 입력
-async def set_item_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def set_item_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['item_name'] = update.message.text
     await update.message.reply_text(f"'{update.message.text}'의 가격을 트론(USDT)으로 입력해주세요.")
-    return "WAITING_FOR_ITEM_PRICE"
+    return WAITING_FOR_ITEM_PRICE
 
 # 판매 물품 가격 입력
-async def set_item_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def set_item_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         price = Decimal(update.message.text)
         item_name = context.user_data.get('item_name')
@@ -84,8 +90,10 @@ async def set_item_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         conn.commit()
 
         await update.message.reply_text(f"'{item_name}'을(를) {price} USDT에 판매 등록하였습니다.")
+        return ConversationHandler.END
     except Exception as e:
-        await update.message.reply_text("유효한 가격을 입력해주세요.")
+        await update.message.reply_text("유효한 가격을 입력해주세요. 숫자로만 입력해 주세요.")
+        return WAITING_FOR_ITEM_PRICE
 
 # /list 명령어 (판매 물품 목록)
 async def list_items(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -118,27 +126,35 @@ async def search_items(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     await update.message.reply_text(message)
 
-# 구매자가 물품 선택 후 오퍼 보내기
-async def send_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        item_id = int(update.message.text)
-        buyer_id = update.message.from_user.id
+# /cancel 명령어 (등록 물품 취소)
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    seller_id = update.message.from_user.id
+    cursor.execute('SELECT id, name FROM items WHERE seller_id=? AND status="available"', (seller_id,))
+    items = cursor.fetchall()
 
-        cursor.execute('SELECT name, seller_id FROM items WHERE id=? AND status="available"', (item_id,))
-        item = cursor.fetchone()
+    if not items:
+        await update.message.reply_text("취소할 물품이 없습니다.")
+        return ConversationHandler.END
 
-        if not item:
-            await update.message.reply_text("유효하지 않은 물품 ID입니다.")
-            return
+    keyboard = [[InlineKeyboardButton(item[1], callback_data=str(item[0]))] for item in items]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-        cursor.execute('INSERT INTO offers (item_id, buyer_id, status) VALUES (?, ?, ?)', (item_id, buyer_id, 'pending'))
-        conn.commit()
+    await update.message.reply_text('취소할 물품을 선택해주세요.', reply_markup=reply_markup)
+    return WAITING_FOR_CANCEL_SELECTION
 
-        await update.message.reply_text(f"{item[0]}에 대한 구매 오퍼를 보냈습니다. 판매자가 수락할 때까지 기다려주세요.")
-    except Exception as e:
-        await update.message.reply_text("유효한 물품 ID를 입력해주세요.")
+# 물품 취소 처리
+async def confirm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    item_id = int(query.data)
 
-# 거래 완료 확인 (/ok)
+    cursor.execute('UPDATE items SET status="cancelled" WHERE id=?', (item_id,))
+    conn.commit()
+
+    await query.edit_message_text(text="선택한 물품을 취소하였습니다.")
+    return ConversationHandler.END
+
+# /ok 명령어 (거래 완료 확인)
 async def confirm_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("거래 완료 확인! 판매자에게 정산을 진행합니다.")
 
@@ -146,14 +162,31 @@ async def confirm_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 def main():
     application = ApplicationBuilder().token(TELEGRAM_API_KEY).build()
 
+    # 판매 물품 등록 대화 흐름
+    sell_handler = ConversationHandler(
+        entry_points=[CommandHandler('sell', sell)],
+        states={
+            WAITING_FOR_ITEM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_name)],
+            WAITING_FOR_ITEM_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_price)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
+    # 물품 취소 대화 흐름
+    cancel_handler = ConversationHandler(
+        entry_points=[CommandHandler('cancel', cancel)],
+        states={
+            WAITING_FOR_CANCEL_SELECTION: [CallbackQueryHandler(confirm_cancel)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("sell", sell))
     application.add_handler(CommandHandler("list", list_items))
     application.add_handler(CommandHandler("search", search_items))
     application.add_handler(CommandHandler("ok", confirm_purchase))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_name))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_price))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, send_offer))
+    application.add_handler(sell_handler)
+    application.add_handler(cancel_handler)
 
     application.run_polling()
 
