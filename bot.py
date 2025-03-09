@@ -1,5 +1,6 @@
 import os
 import logging
+import requests
 from decimal import Decimal, InvalidOperation
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
