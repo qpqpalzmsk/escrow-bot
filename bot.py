@@ -123,10 +123,10 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 def main():
     app = Application.builder().token(os.getenv('TELEGRAM_API_KEY')).build()
     
-    app.add_handler(CommandHandler("시작", start))
-    app.add_handler(CommandHandler("가입", register))
-    app.add_handler(CommandHandler("판매등록", add_item))
-    app.add_handler(CommandHandler("구매", purchase_item))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("join", register))
+    app.add_handler(CommandHandler("add", add_item))
+    app.add_handler(CommandHandler("buy", purchase_item))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, relay_message))
     
     app.run_polling()
