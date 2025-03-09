@@ -116,32 +116,45 @@ async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 # 판매 물품 이름 입력
 async def set_item_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['item_name'] = update.message.text
-    await update.message.reply_text(f"'{update.message.text}'의 가격을 트론(USDT)으로 입력해주세요.")
+    item_name = update.message.text.strip()
+    
+    if not item_name:
+        await update.message.reply_text("물품 이름을 입력해주세요. (한글, 영어 모두 가능)")
+        return WAITING_FOR_ITEM_NAME
+
+    context.user_data['item_name'] = item_name
+    await update.message.reply_text(f"'{item_name}'의 가격을 트론(USDT)으로 입력해주세요.")
     return WAITING_FOR_ITEM_PRICE
 
 # 판매 물품 가격 입력
 async def set_item_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    price_str = update.message.text.strip()
     try:
-        price = Decimal(update.message.text.strip())
+        # 가격은 숫자와 소수점만 허용
+        if not price_str.replace('.', '', 1).isdigit():
+            await update.message.reply_text("유효한 가격을 입력해주세요. 숫자 형식으로만 입력해 주세요.")
+            return WAITING_FOR_ITEM_PRICE
+
+        price = Decimal(price_str)
         context.user_data['price'] = price
         await update.message.reply_text("물품의 종류를 입력해주세요 (디지털/현물).")
         return WAITING_FOR_ITEM_TYPE
     except (InvalidOperation, ValueError) as e:
         logging.error(f"가격 변환 오류: {e}")
-        await update.message.reply_text("유효한 가격을 입력해주세요. 숫자로만 입력해 주세요.")
+        await update.message.reply_text("유효한 가격을 입력해주세요. (숫자 형식만 가능)")
         return WAITING_FOR_ITEM_PRICE
 
 # 물품 종류 입력
 async def set_item_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    item_name = context.user_data.get('item_name')
-    price = context.user_data.get('price')
-    seller_id = update.message.from_user.id  # 판매자의 ID는 내부적으로만 사용
     item_type = update.message.text.strip().lower()
 
     if item_type not in ['디지털', '현물']:
         await update.message.reply_text("유효한 종류를 입력해주세요. (디지털/현물)")
         return WAITING_FOR_ITEM_TYPE
+
+    item_name = context.user_data.get('item_name')
+    price = context.user_data.get('price')
+    seller_id = update.message.from_user.id
 
     conn.execute(text('INSERT INTO items (name, price, seller_id, status, type) VALUES (:name, :price, :seller_id, :status, :type)'),
                  {'name': item_name, 'price': price, 'seller_id': seller_id, 'status': 'available', 'type': item_type})
@@ -152,7 +165,7 @@ async def set_item_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 # /list 명령어 (판매 물품 목록)
 async def list_items(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    page = int(context.args[0]) if context.args else 1
+    page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
     items_per_page = 10
     offset = (page - 1) * items_per_page
 
@@ -347,24 +360,24 @@ async def exit_to_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text("초기 화면으로 돌아갑니다. 판매할 물품은 /sell, 구매할 물품은 /list를 입력해주세요.")
     return ConversationHandler.END
 
-# /cancel 명령어 (본인이 등록한 물품 제거)
+# /cancel 명령어 (물품 삭제)
 async def cancel_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    item_id = int(context.args[0]) if context.args else None
-    user_id = update.message.from_user.id
-
-    if not item_id:
-        await update.message.reply_text("유효하지 않은 물품 ID입니다.")
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("유효한 물품 ID를 입력해주세요. 예: /cancel 123")
         return
 
-    item = conn.execute(text('SELECT id, seller_id FROM items WHERE id=:id AND status=:status'),
-                        {'id': item_id, 'status': 'available'}).fetchone()
+    item_id = int(context.args[0])
+    seller_id = update.message.from_user.id
 
-    if not item or item.seller_id != user_id:
-        await update.message.reply_text("해당 물품을 취소할 권한이 없습니다.")
+    # 판매자가 본인의 물품만 삭제할 수 있도록 검증
+    result = conn.execute(text('SELECT id FROM items WHERE id=:id AND seller_id=:seller_id AND status="available"'),
+                          {'id': item_id, 'seller_id': seller_id}).fetchone()
+
+    if not result:
+        await update.message.reply_text("유효하지 않은 물품 ID이거나 삭제 권한이 없습니다.")
         return
 
-    conn.execute(text('UPDATE items SET status=:status WHERE id=:id'),
-                 {'status': 'cancelled', 'id': item_id})
+    conn.execute(text('UPDATE items SET status="cancelled" WHERE id=:id'), {'id': item_id})
     conn.commit()
 
     await update.message.reply_text("작업이 취소되었습니다. 초기 화면으로 돌아갑니다.")
