@@ -149,6 +149,11 @@ async def set_item_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await update.message.reply_text(f"'{item_name}'을(를) {price} USDT에 판매 등록하였습니다.")
     return ConversationHandler.END
 
+# /cancel 명령어 처리
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("작업이 취소되었습니다. 초기 화면으로 돌아갑니다.")
+    return ConversationHandler.END
+
 # /list 명령어 (판매 물품 목록)
 async def list_items(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     page = int(context.args[0]) if context.args else 1
