@@ -79,6 +79,7 @@ if conn:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         '''))
+
         conn.commit()
         logging.info("데이터베이스 테이블 초기화 완료")
     except SQLAlchemyError as e:
@@ -101,8 +102,8 @@ logging.basicConfig(
 WAITING_FOR_ITEM_NAME = 1
 WAITING_FOR_ITEM_PRICE = 2
 WAITING_FOR_ITEM_TYPE = 3
-WAITING_FOR_CANCEL_SELECTION = 4
-WAITING_FOR_RATING = 5
+WAITING_FOR_RATING = 4
+WAITING_FOR_CANCEL_SELECTION = 5
 
 # /start 명령어
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -149,25 +150,13 @@ async def set_item_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await update.message.reply_text(f"'{item_name}'을(를) {price} USDT에 판매 등록하였습니다.")
     return ConversationHandler.END
 
-# /cancel 명령어 처리
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("작업이 취소되었습니다. 초기 화면으로 돌아갑니다.")
-    return ConversationHandler.END
-
-# /cancel 명령어 처리 콜백
-async def confirm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(text="작업이 취소되었습니다. 초기 화면으로 돌아갑니다.")
-    return ConversationHandler.END
-
 # /list 명령어 (판매 물품 목록)
 async def list_items(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     page = int(context.args[0]) if context.args else 1
     items_per_page = 10
     offset = (page - 1) * items_per_page
 
-    items = conn.execute(text('SELECT id, name, price FROM items WHERE status=:status LIMIT :limit OFFSET :offset'),
+    items = conn.execute(text('SELECT id, name, price, seller_id FROM items WHERE status=:status LIMIT :limit OFFSET :offset'),
                          {'status': 'available', 'limit': items_per_page, 'offset': offset}).fetchall()
 
     if not items:
@@ -176,7 +165,7 @@ async def list_items(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     message = "판매 중인 물품 목록:\n"
     for item in items:
-        message += f"{item.id}. {item.name} - {item.price} USDT\n"
+        message += f"{item.id}. {item.name} - {item.price} USDT (판매자 ID: {item.seller_id})\n"
 
     next_page = f"/list {page + 1}"
     prev_page = f"/list {page - 1}" if page > 1 else None
@@ -202,7 +191,7 @@ async def send_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         item_id = int(update.message.text)
         buyer_id = update.message.from_user.id
 
-        item = conn.execute(text('SELECT name, seller_id, price FROM items WHERE id=:id AND status=:status'),
+        item = conn.execute(text('SELECT id, name, seller_id, price FROM items WHERE id=:id AND status=:status'),
                             {'id': item_id, 'status': 'available'}).fetchone()
 
         if not item:
@@ -210,51 +199,57 @@ async def send_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
 
         # 거래 생성
-        conn.execute(text('INSERT INTO transactions (item_id, buyer_id, seller_id, status) VALUES (:item_id, :buyer_id, :seller_id, :status)'),
-                     {'item_id': item_id, 'buyer_id': buyer_id, 'seller_id': item.seller_id, 'status': 'pending'})
+        conn.execute(text('INSERT INTO transactions (item_id, buyer_id, seller_id, status, amount) VALUES (:item_id, :buyer_id, :seller_id, :status, :amount)'),
+                     {'item_id': item.id, 'buyer_id': buyer_id, 'seller_id': item.seller_id, 'status': 'pending', 'amount': item.price})
         conn.commit()
 
         await update.message.reply_text(f"{item.name}에 대한 구매 오퍼를 보냈습니다. 판매자가 수락할 때까지 기다려주세요.")
+
+        # 판매자에게 오퍼 알림
+        await context.bot.send_message(item.seller_id, f"'{item.name}'에 대한 구매 오퍼가 도착했습니다. 수락하려면 /accept {item_id}, 거절하려면 /reject {item_id}를 입력해주세요.")
     except Exception as e:
         await update.message.reply_text("유효한 물품 ID를 입력해주세요.")
 
 # 판매자가 오퍼를 수락하거나 거절
 async def handle_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    data = query.data.split(':')
+    command = update.message.text.split()
+    if len(command) != 2:
+        await update.message.reply_text("유효하지 않은 명령어 형식입니다. 예: /accept 123 또는 /reject 123")
+        return
 
-    if data[0] == 'accept':
-        transaction_id = data[1]
-        transaction = conn.execute(text('SELECT * FROM transactions WHERE id=:id AND status=:status'),
-                                   {'id': transaction_id, 'status': 'pending'}).fetchone()
+    action, item_id = command[0], command[1]
 
-        if not transaction:
-            await query.edit_message_text("유효하지 않은 거래입니다.")
-            return
+    transaction = conn.execute(text('SELECT * FROM transactions WHERE item_id=:item_id AND status=:status'),
+                               {'item_id': item_id, 'status': 'pending'}).fetchone()
 
-        conn.execute(text('UPDATE transactions SET status=:status WHERE id=:id'), 
-                     {'status': 'accepted', 'id': transaction_id})
+    if not transaction:
+        await update.message.reply_text("유효하지 않은 거래입니다.")
+        return
+
+    if action == '/accept':
+        conn.execute(text('UPDATE transactions SET status=:status WHERE id=:id'),
+                     {'status': 'accepted', 'id': transaction.id})
         conn.commit()
 
-        await query.edit_message_text("거래를 수락하였습니다. 구매자에게 입금 안내를 보냅니다.")
+        await update.message.reply_text("거래를 수락하였습니다. 구매자에게 입금 안내를 보냅니다.")
         await context.bot.send_message(transaction.buyer_id, f"거래가 수락되었습니다. 다음 주소로 {transaction.amount} USDT를 보내주세요: {BOT_WALLET_ADDRESS}")
-    elif data[0] == 'reject':
-        transaction_id = data[1]
-        conn.execute(text('UPDATE transactions SET status=:status WHERE id=:id'), 
-                     {'status': 'rejected', 'id': transaction_id})
+    elif action == '/reject':
+        conn.execute(text('UPDATE transactions SET status=:status WHERE id=:id'),
+                     {'status': 'rejected', 'id': transaction.id})
         conn.commit()
-        await query.edit_message_text("거래를 거절하였습니다.")
+        await update.message.reply_text("거래를 거절하였습니다.")
 
 # 테더(USDT) 입금 확인
 def check_usdt_payment(expected_amount: Decimal, buyer_address: str) -> bool:
-    try:
-        contract_address = "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"  # USDT TRC20 계약 주소
-        balance = client.get_account_balance(BOT_WALLET_ADDRESS, contract_address)
-        balance = Decimal(balance) / Decimal(1e6)
+    # TRC20 토큰 계약 주소 (예시: USDT TRC20)
+    contract_address = "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"
 
-        if balance >= expected_amount:
-            return True
+    try:
+        transactions = client.get_transaction_list(BOT_WALLET_ADDRESS, only_confirmed=True)
+
+        for tx in transactions:
+            if tx['to'] == BOT_WALLET_ADDRESS and Decimal(tx['value']) >= expected_amount:
+                return True
         return False
     except Exception as e:
         logging.error(f"트론 입금 확인 오류: {e}")
@@ -262,10 +257,11 @@ def check_usdt_payment(expected_amount: Decimal, buyer_address: str) -> bool:
 
 # 입금 확인 및 거래 완료
 async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    transaction_id = context.args[0] if context.args else None
-    if not transaction_id:
+    if not context.args:
         await update.message.reply_text("유효하지 않은 거래 ID입니다.")
         return
+
+    transaction_id = context.args[0]
 
     transaction = conn.execute(text('SELECT * FROM transactions WHERE id=:id AND status=:status'),
                                {'id': transaction_id, 'status': 'accepted'}).fetchone()
@@ -277,9 +273,9 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     item = conn.execute(text('SELECT * FROM items WHERE id=:id'), {'id': transaction.item_id}).fetchone()
 
     if check_usdt_payment(item.price, transaction.buyer_id):
-        conn.execute(text('UPDATE transactions SET status=:status WHERE id=:id'), 
-                     {'status': 'completed', 'id': transaction_id})
-        conn.execute(text('UPDATE items SET status=:status WHERE id=:id'), 
+        conn.execute(text('UPDATE transactions SET status=:status WHERE id=:id'),
+                     {'status': 'completed', 'id': transaction.id})
+        conn.execute(text('UPDATE items SET status=:status WHERE id=:id'),
                      {'status': 'sold', 'id': item.id})
         conn.commit()
 
@@ -290,14 +286,14 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 # 거래 완료 후 평가 시스템
 async def rate_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    transaction_id = context.args[0] if context.args else None
-    if not transaction_id:
+    if not context.args:
         await update.message.reply_text("유효하지 않은 거래 ID입니다.")
         return
 
-    await update.message.reply_text("거래 평가를 위해 1점에서 5점 사이의 평점을 입력해주세요.")
+    transaction_id = context.args[0]
     context.user_data['transaction_id'] = transaction_id
-    return WAITING_FOR_RATING
+
+    await update.message.reply_text("거래 평가를 위해 1점에서 5점 사이의 평점을 입력해주세요.")
 
 # 평점 저장
 async def save_rating(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -307,10 +303,9 @@ async def save_rating(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             raise ValueError("평점은 1에서 5 사이의 숫자여야 합니다.")
 
         transaction_id = context.user_data.get('transaction_id')
-        user_id = update.message.from_user.id
 
         conn.execute(text('INSERT INTO ratings (user_id, score, review) VALUES (:user_id, :score, :review)'),
-                     {'user_id': user_id, 'score': rating, 'review': update.message.text})
+                     {'user_id': update.message.from_user.id, 'score': rating, 'review': update.message.text})
         conn.commit()
 
         await update.message.reply_text(f"거래에 {rating}점을 주셨습니다. 감사합니다!")
@@ -318,19 +313,14 @@ async def save_rating(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     except ValueError as e:
         await update.message.reply_text("유효한 평점을 입력해주세요. (1~5점)")
         return WAITING_FOR_RATING
-
-# /exit 명령어 (초기 화면으로 돌아가기)
-async def exit_to_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("초기 화면으로 돌아갑니다. 판매할 물품은 /sell, 구매할 물품은 /list를 입력해주세요.")
-    return ConversationHandler.END
-
+    
 # 안전한 채팅 및 파일 전송 지원
 async def start_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    transaction_id = context.args[0] if context.args else None
-    if not transaction_id:
+    if not context.args:
         await update.message.reply_text("유효하지 않은 거래 ID입니다.")
         return
 
+    transaction_id = context.args[0]
     transaction = conn.execute(text('SELECT * FROM transactions WHERE id=:id'), {'id': transaction_id}).fetchone()
 
     if not transaction:
@@ -338,7 +328,8 @@ async def start_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     context.user_data['transaction_id'] = transaction_id
-    context.user_data['chat_partner'] = transaction.buyer_id if update.message.from_user.id == transaction.seller_id else transaction.seller_id
+    chat_partner = transaction.buyer_id if update.message.from_user.id == transaction.seller_id else transaction.seller_id
+    context.user_data['chat_partner'] = chat_partner
 
     await update.message.reply_text("채팅을 시작합니다. 상대방에게 메시지를 보내세요.")
 
@@ -359,30 +350,32 @@ async def forward_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             photo = update.message.photo[-1]
             await context.bot.send_photo(chat_partner, photo.file_id, caption="사진을 받았습니다.")
 
-# 대화 흐름 설정
-chat_handler = ConversationHandler(
-    entry_points=[CommandHandler('chat', start_chat)],
-    states={
-        WAITING_FOR_RATING: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_rating)],
-        ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, exit_to_start)]
-    },
-    fallbacks=[CommandHandler('exit', exit_to_start)],
-    conversation_timeout=300  # 5분 동안 입력이 없으면 초기화
-)
+# /cancel 명령어 (자신이 등록한 물품 삭제)
+async def cancel_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("물품 ID를 입력해주세요. 예: /cancel 123")
+        return
 
-# 평가 대화 흐름
-rating_handler = ConversationHandler(
-    entry_points=[CommandHandler('rate', rate_transaction)],
-    states={
-        WAITING_FOR_RATING: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_rating)]
-    },
-    fallbacks=[CommandHandler('exit', exit_to_start)]
-)
+    item_id = int(context.args[0])
+    seller_id = update.message.from_user.id
 
-# 메인 함수에 추가
+    item = conn.execute(text('SELECT * FROM items WHERE id=:id AND seller_id=:seller_id AND status=:status'),
+                        {'id': item_id, 'seller_id': seller_id, 'status': 'available'}).fetchone()
+
+    if not item:
+        await update.message.reply_text("삭제할 물품이 없거나 권한이 없습니다.")
+        return
+
+    conn.execute(text('DELETE FROM items WHERE id=:id'), {'id': item_id})
+    conn.commit()
+
+    await update.message.reply_text(f"물품 '{item.name}'을(를) 삭제하였습니다.")
+
+# 메인 함수
 def main():
     application = ApplicationBuilder().token(TELEGRAM_API_KEY).build()
 
+    # 대화 흐름 정의
     sell_handler = ConversationHandler(
         entry_points=[CommandHandler('sell', sell)],
         states={
@@ -393,16 +386,30 @@ def main():
         fallbacks=[CommandHandler('exit', exit_to_start)]
     )
 
-    cancel_handler = ConversationHandler(
-        entry_points=[CommandHandler('cancel', cancel)],
+    # 평가 대화 흐름
+    rating_handler = ConversationHandler(
+        entry_points=[CommandHandler('rate', rate_transaction)],
         states={
-            WAITING_FOR_CANCEL_SELECTION: [CallbackQueryHandler(confirm_cancel)],
+            WAITING_FOR_RATING: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_rating)]
         },
         fallbacks=[CommandHandler('exit', exit_to_start)]
     )
 
+    # 안전한 채팅 대화 흐름
+    chat_handler = ConversationHandler(
+        entry_points=[CommandHandler('chat', start_chat)],
+        states={
+            WAITING_FOR_RATING: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_rating)],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, exit_to_start)]
+        },
+        fallbacks=[CommandHandler('exit', exit_to_start)],
+        conversation_timeout=300  # 5분 동안 입력이 없으면 초기화
+    )
+
+    # 핸들러 등록
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("list", list_items))
+    application.add_handler(CommandHandler("cancel", cancel_item))
     application.add_handler(CallbackQueryHandler(paginate, pattern="^/list"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, send_offer))
     application.add_handler(CallbackQueryHandler(handle_offer, pattern="^(accept|reject):"))
@@ -411,7 +418,11 @@ def main():
     application.add_handler(rating_handler)
     application.add_handler(CommandHandler("exit", exit_to_start))
     application.add_handler(sell_handler)
-    application.add_handler(cancel_handler)
+
+    # 메시지 및 파일 전송
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, forward_message))
+    application.add_handler(MessageHandler(filters.Document.ALL, forward_file))
+    application.add_handler(MessageHandler(filters.PHOTO, forward_file))
 
     application.run_polling()
 
