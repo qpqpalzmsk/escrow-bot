@@ -87,7 +87,7 @@ if conn:
 # TronPy 클라이언트 초기화
 session = requests.Session()
 session.headers.update({"TRON-PRO-API-KEY": TRON_API_KEY})
-client = Tron(provider=HTTPProvider(TRON_API, session=session))
+client = Tron(provider=HTTPProvider(TRON_API))
 
 # 로깅 설정
 logging.basicConfig(
