@@ -17,6 +17,7 @@ import random
 import string
 from tronpy import Tron
 from tronpy.keys import PrivateKey
+from tronpy.providers import HTTPProvider
 from tronpy.exceptions import TransactionError
 
 # 환경 변수 설정
@@ -32,6 +33,7 @@ TRANSFER_FEE = Decimal('1.0')  # 송금 수수료 (TRON 기준)
 tron = Tron()
 SELLER_ADDRESS = "TT8AZ3dCpgWJQSw9EXhhyR3uKj81jXxbRB"
 private_key = PrivateKey(bytes.fromhex(PRIVATE_KEY))
+client = Tron(provider=HTTPProvider(TRON_API))
 
 # 데이터베이스 연결 설정 (PostgreSQL)
 try:
