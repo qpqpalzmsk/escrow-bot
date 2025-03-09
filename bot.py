@@ -102,6 +102,7 @@ WAITING_FOR_ITEM_NAME = 1
 WAITING_FOR_ITEM_PRICE = 2
 WAITING_FOR_ITEM_TYPE = 3
 WAITING_FOR_CANCEL_SELECTION = 4
+WAITING_FOR_RATING = 5
 
 # /start 명령어
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
