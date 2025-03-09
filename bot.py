@@ -89,8 +89,8 @@ session = requests.Session()
 session.headers.update({"TRON-PRO-API-KEY": TRON_API_KEY})
 
 # TronPy 클라이언트 초기화
+client = Tron(provider=HTTPProvider(TRON_API))
 
-client = Tron(provider=HTTPProvider(TRON_API, session=session))
 # 로깅 설정
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -189,8 +189,8 @@ async def send_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         item_id = int(update.message.text)
         buyer_id = update.message.from_user.id
 
-        item = conn.execute(text('SELECT name, seller_id, price FROM items WHERE id=:id AND status="available"'),
-                            {'id': item_id}).fetchone()
+        item = conn.execute(text('SELECT name, seller_id, price FROM items WHERE id=:id AND status=:status'),
+                            {'id': item_id, 'status': 'available'}).fetchone()
 
         if not item:
             await update.message.reply_text("유효하지 않은 물품 ID입니다.")
@@ -213,32 +213,32 @@ async def handle_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if data[0] == 'accept':
         transaction_id = data[1]
-        transaction = conn.execute(text('SELECT * FROM transactions WHERE id=:id AND status="pending"'),
-                                   {'id': transaction_id}).fetchone()
+        transaction = conn.execute(text('SELECT * FROM transactions WHERE id=:id AND status=:status'),
+                                   {'id': transaction_id, 'status': 'pending'}).fetchone()
 
         if not transaction:
             await query.edit_message_text("유효하지 않은 거래입니다.")
             return
 
-        conn.execute(text('UPDATE transactions SET status="accepted" WHERE id=:id'), {'id': transaction_id})
+        conn.execute(text('UPDATE transactions SET status=:status WHERE id=:id'), 
+                     {'status': 'accepted', 'id': transaction_id})
         conn.commit()
 
         await query.edit_message_text("거래를 수락하였습니다. 구매자에게 입금 안내를 보냅니다.")
         await context.bot.send_message(transaction.buyer_id, f"거래가 수락되었습니다. 다음 주소로 {transaction.amount} USDT를 보내주세요: {BOT_WALLET_ADDRESS}")
     elif data[0] == 'reject':
         transaction_id = data[1]
-        conn.execute(text('UPDATE transactions SET status="rejected" WHERE id=:id'), {'id': transaction_id})
+        conn.execute(text('UPDATE transactions SET status=:status WHERE id=:id'), 
+                     {'status': 'rejected', 'id': transaction_id})
         conn.commit()
         await query.edit_message_text("거래를 거절하였습니다.")
 
 # 테더(USDT) 입금 확인
 def check_usdt_payment(expected_amount: Decimal, buyer_address: str) -> bool:
-    # TRC20 토큰 계약 주소 (예시: USDT TRC20)
-    contract_address = "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"
-
     try:
-        response = client.get_account(BOT_WALLET_ADDRESS)
-        balance = Decimal(response.get("balance", "0")) / Decimal(1e6)
+        contract_address = "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"  # USDT TRC20 계약 주소
+        balance = client.get_account_balance(BOT_WALLET_ADDRESS, contract_address)
+        balance = Decimal(balance) / Decimal(1e6)
 
         if balance >= expected_amount:
             return True
@@ -254,8 +254,8 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("유효하지 않은 거래 ID입니다.")
         return
 
-    transaction = conn.execute(text('SELECT * FROM transactions WHERE id=:id AND status="accepted"'),
-                               {'id': transaction_id}).fetchone()
+    transaction = conn.execute(text('SELECT * FROM transactions WHERE id=:id AND status=:status'),
+                               {'id': transaction_id, 'status': 'accepted'}).fetchone()
 
     if not transaction:
         await update.message.reply_text("거래가 유효하지 않습니다.")
@@ -264,8 +264,10 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     item = conn.execute(text('SELECT * FROM items WHERE id=:id'), {'id': transaction.item_id}).fetchone()
 
     if check_usdt_payment(item.price, transaction.buyer_id):
-        conn.execute(text('UPDATE transactions SET status="completed" WHERE id=:id'), {'id': transaction_id})
-        conn.execute(text('UPDATE items SET status="sold" WHERE id=:id'), {'id': item.id})
+        conn.execute(text('UPDATE transactions SET status=:status WHERE id=:id'), 
+                     {'status': 'completed', 'id': transaction_id})
+        conn.execute(text('UPDATE items SET status=:status WHERE id=:id'), 
+                     {'status': 'sold', 'id': item.id})
         conn.commit()
 
         await update.message.reply_text("거래 완료! 판매자에게 물품을 보내주세요.")
@@ -292,9 +294,10 @@ async def save_rating(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             raise ValueError("평점은 1에서 5 사이의 숫자여야 합니다.")
 
         transaction_id = context.user_data.get('transaction_id')
+        user_id = update.message.from_user.id
 
-        conn.execute(text('INSERT INTO ratings (transaction_id, rating) VALUES (:transaction_id, :rating)'),
-                     {'transaction_id': transaction_id, 'rating': rating})
+        conn.execute(text('INSERT INTO ratings (user_id, score, review) VALUES (:user_id, :score, :review)'),
+                     {'user_id': user_id, 'score': rating, 'review': update.message.text})
         conn.commit()
 
         await update.message.reply_text(f"거래에 {rating}점을 주셨습니다. 감사합니다!")
@@ -372,8 +375,9 @@ def main():
         states={
             WAITING_FOR_ITEM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_name)],
             WAITING_FOR_ITEM_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_price)],
+            WAITING_FOR_ITEM_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_type)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)]
+        fallbacks=[CommandHandler('exit', exit_to_start)]
     )
 
     cancel_handler = ConversationHandler(
