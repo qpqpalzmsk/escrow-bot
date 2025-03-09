@@ -16,7 +16,6 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from tronpy import Tron
 from tronpy.providers import HTTPProvider
-import requests
 
 # 환경 변수 설정
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
@@ -90,7 +89,7 @@ session = requests.Session()
 session.headers.update({"TRON-PRO-API-KEY": TRON_API_KEY})
 
 # TronPy 클라이언트 초기화
-client = Tron(provider=HTTPProvider(TRON_API, headers={"TRON-PRO-API-KEY": TRON_API_KEY}))
+Tron(provider=HTTPProvider(TRON_API, client=session))
 
 # 로깅 설정
 logging.basicConfig(
