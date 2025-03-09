@@ -1,6 +1,6 @@
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -80,10 +80,13 @@ async def set_item_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 # 판매 물품 가격 입력
 async def set_item_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        # 숫자만 입력받도록 필터링
+        # 숫자와 소수점만 허용, 소수점이 여러 개 포함되지 않도록 함
         price_text = update.message.text.strip()
-        if not price_text.replace('.', '', 1).isdigit():
-            raise ValueError("유효한 숫자가 아닙니다.")
+        
+        # 소수점은 하나만 허용, 나머지는 숫자여야 함
+        if not price_text.replace('.', '', 1).isdigit() or price_text.count('.') > 1:
+            await update.message.reply_text("유효한 가격을 입력해주세요. 숫자로만 입력해 주세요.")
+            return WAITING_FOR_ITEM_PRICE
 
         price = Decimal(price_text)
         item_name = context.user_data.get('item_name')
