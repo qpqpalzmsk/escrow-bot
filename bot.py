@@ -24,37 +24,43 @@ TRANSFER_FEE = Decimal('1.0')  # 송금 수수료 (TRON 기준)
 
 # 데이터베이스 연결 설정 (PostgreSQL)
 try:
-    engine = create_engine(DATABASE_URL)
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    
+    engine = create_engine(DATABASE_URL, echo=True)
     conn = engine.connect()
     logging.info("데이터베이스 연결 성공")
 except SQLAlchemyError as e:
     logging.error(f"데이터베이스 연결 오류: {e}")
+    conn = None
 
 # 데이터베이스 초기화
-try:
-    conn.execute(text('''
-    CREATE TABLE IF NOT EXISTS items (
-        id SERIAL PRIMARY KEY,
-        name TEXT,
-        price DECIMAL,
-        seller_id INTEGER,
-        status TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    '''))
+if conn:
+    try:
+        conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS items (
+            id SERIAL PRIMARY KEY,
+            name TEXT,
+            price DECIMAL,
+            seller_id INTEGER,
+            status TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
 
-    conn.execute(text('''
-    CREATE TABLE IF NOT EXISTS offers (
-        id SERIAL PRIMARY KEY,
-        item_id INTEGER REFERENCES items(id),
-        buyer_id INTEGER,
-        status TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    '''))
-    conn.commit()
-except SQLAlchemyError as e:
-    logging.error(f"데이터베이스 초기화 오류: {e}")
+        conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS offers (
+            id SERIAL PRIMARY KEY,
+            item_id INTEGER REFERENCES items(id),
+            buyer_id INTEGER,
+            status TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        conn.commit()
+        logging.info("데이터베이스 테이블 초기화 완료")
+    except SQLAlchemyError as e:
+        logging.error(f"Database Initialization Error: {e}")
 
 # 로깅 설정
 logging.basicConfig(
@@ -108,49 +114,36 @@ async def set_item_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logging.error(f"Error converting price: {e}")
         await update.message.reply_text("유효한 가격을 입력해주세요. 숫자로만 입력해 주세요.")
         return WAITING_FOR_ITEM_PRICE
-    except SQLAlchemyError as e:
-        logging.error(f"데이터베이스 저장 오류: {e}")
-        await update.message.reply_text("데이터베이스 저장 중 오류가 발생했습니다.")
-        return ConversationHandler.END
 
 # /list 명령어 (판매 물품 목록)
 async def list_items(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        items = conn.execute(text('SELECT id, name, price FROM items WHERE status=:status'), {'status': 'available'}).fetchall()
+    items = conn.execute(text('SELECT id, name, price FROM items WHERE status=:status'), {'status': 'available'}).fetchall()
 
-        if not items:
-            await update.message.reply_text("판매 중인 물품이 없습니다.")
-            return
+    if not items:
+        await update.message.reply_text("판매 중인 물품이 없습니다.")
+        return
 
-        message = "판매 중인 물품 목록:\n"
-        for item in items:
-            message += f"{item.id}. {item.name} - {item.price} USDT\n"
-        
-        await update.message.reply_text(message)
-    except SQLAlchemyError as e:
-        logging.error(f"데이터베이스 조회 오류: {e}")
-        await update.message.reply_text("물품 목록을 가져오는 중 오류가 발생했습니다.")
+    message = "판매 중인 물품 목록:\n"
+    for item in items:
+        message += f"{item.id}. {item.name} - {item.price} USDT\n"
+    
+    await update.message.reply_text(message)
 
 # /cancel 명령어 (등록 물품 취소)
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     seller_id = update.message.from_user.id
-    try:
-        items = conn.execute(text('SELECT id, name FROM items WHERE seller_id=:seller_id AND status=:status'),
-                             {'seller_id': seller_id, 'status': 'available'}).fetchall()
+    items = conn.execute(text('SELECT id, name FROM items WHERE seller_id=:seller_id AND status=:status'),
+                         {'seller_id': seller_id, 'status': 'available'}).fetchall()
 
-        if not items:
-            await update.message.reply_text("취소할 물품이 없습니다.")
-            return ConversationHandler.END
-
-        keyboard = [[InlineKeyboardButton(item.name, callback_data=str(item.id))] for item in items]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await update.message.reply_text('취소할 물품을 선택해주세요.', reply_markup=reply_markup)
-        return WAITING_FOR_CANCEL_SELECTION
-    except SQLAlchemyError as e:
-        logging.error(f"데이터베이스 조회 오류: {e}")
-        await update.message.reply_text("물품을 불러오는 중 오류가 발생했습니다.")
+    if not items:
+        await update.message.reply_text("취소할 물품이 없습니다.")
         return ConversationHandler.END
+
+    keyboard = [[InlineKeyboardButton(item.name, callback_data=str(item.id))] for item in items]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text('취소할 물품을 선택해주세요.', reply_markup=reply_markup)
+    return WAITING_FOR_CANCEL_SELECTION
 
 # 물품 취소 처리
 async def confirm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -158,16 +151,11 @@ async def confirm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     item_id = int(query.data)
 
-    try:
-        conn.execute(text('UPDATE items SET status=:status WHERE id=:id'), {'status': 'cancelled', 'id': item_id})
-        conn.commit()
+    conn.execute(text('UPDATE items SET status=:status WHERE id=:id'), {'status': 'cancelled', 'id': item_id})
+    conn.commit()
 
-        await query.edit_message_text(text="선택한 물품을 취소하였습니다.")
-        return ConversationHandler.END
-    except SQLAlchemyError as e:
-        logging.error(f"데이터베이스 업데이트 오류: {e}")
-        await query.edit_message_text(text="물품을 취소하는 중 오류가 발생했습니다.")
-        return ConversationHandler.END
+    await query.edit_message_text(text="선택한 물품을 취소하였습니다.")
+    return ConversationHandler.END
 
 # /ok 명령어 (거래 완료 확인)
 async def confirm_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
