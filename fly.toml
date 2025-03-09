@@ -1,0 +1,25 @@
+app = "escrow-bot"
+
+[env]
+  TELEGRAM_API_KEY = "your_telegram_bot_api_key"
+  DATABASE_URL = "postgres://user:password@your-db-host.internal:5432/escrow_db"
+  PRIVATE_KEY = "your_private_key"
+
+[deploy]
+  release_command = "python bot.py"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
