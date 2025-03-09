@@ -42,7 +42,8 @@ if conn:
             id SERIAL PRIMARY KEY,
             name TEXT,
             price DECIMAL,
-            seller_id INTEGER,
+            item_type TEXT,
+            seller_id BIGINT,
             status TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -52,7 +53,7 @@ if conn:
         CREATE TABLE IF NOT EXISTS offers (
             id SERIAL PRIMARY KEY,
             item_id INTEGER REFERENCES items(id),
-            buyer_id INTEGER,
+            buyer_id BIGINT,
             status TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -71,7 +72,12 @@ logging.basicConfig(
 # 상태 정의
 WAITING_FOR_ITEM_NAME = 1
 WAITING_FOR_ITEM_PRICE = 2
-WAITING_FOR_CANCEL_SELECTION = 3
+WAITING_FOR_ITEM_TYPE = 3
+WAITING_FOR_ITEM_SELECTION = 4
+WAITING_FOR_CANCEL_SELECTION = 5
+
+# 페이지당 물품 수
+ITEMS_PER_PAGE = 10
 
 # /start 명령어
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -90,105 +96,169 @@ async def set_item_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 # 판매 물품 가격 입력
 async def set_item_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    price_input = update.message.text.strip()
-    logging.info(f"Received price input: {price_input}")
-    
     try:
-        # 숫자로만 구성된지 확인
-        if not price_input.replace('.', '', 1).isdigit():
-            raise ValueError("입력 값이 숫자가 아님")
-        
-        price = Decimal(price_input)
-        logging.info(f"Converted price: {price}")
-
-        item_name = context.user_data.get('item_name')
-        seller_id = update.message.from_user.id
-
-        conn.execute(text('INSERT INTO items (name, price, seller_id, status) VALUES (:name, :price, :seller_id, :status)'),
-                     {'name': item_name, 'price': price, 'seller_id': seller_id, 'status': 'available'})
-        conn.commit()
-
-        await update.message.reply_text(f"'{item_name}'을(를) {price} USDT에 판매 등록하였습니다.")
-        return ConversationHandler.END
-    except (InvalidOperation, ValueError) as e:
-        logging.error(f"Error converting price: {e}")
+        price = Decimal(update.message.text.strip())
+        context.user_data['item_price'] = price
+        await update.message.reply_text("물품 유형을 입력해주세요. (디지털/현물)")
+        return WAITING_FOR_ITEM_TYPE
+    except InvalidOperation:
         await update.message.reply_text("유효한 가격을 입력해주세요. 숫자로만 입력해 주세요.")
         return WAITING_FOR_ITEM_PRICE
 
-# /list 명령어 (판매 물품 목록)
+# 판매 물품 유형 입력
+async def set_item_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    item_type = update.message.text.strip().lower()
+    if item_type not in ['디지털', '현물']:
+        await update.message.reply_text("유효한 물품 유형을 입력해주세요. (디지털/현물)")
+        return WAITING_FOR_ITEM_TYPE
+
+    item_name = context.user_data.get('item_name')
+    item_price = context.user_data.get('item_price')
+    seller_id = update.message.from_user.id
+
+    conn.execute(text('INSERT INTO items (name, price, item_type, seller_id, status) VALUES (:name, :price, :item_type, :seller_id, :status)'),
+                 {'name': item_name, 'price': item_price, 'item_type': item_type, 'seller_id': seller_id, 'status': 'available'})
+    conn.commit()
+
+    await update.message.reply_text(f"'{item_name}'을(를) {item_price} USDT에 판매 등록하였습니다. 유형: {item_type}")
+    return ConversationHandler.END
+
+# /list 명령어 (물품 목록 표시)
 async def list_items(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    items = conn.execute(text('SELECT id, name, price FROM items WHERE status=:status'), {'status': 'available'}).fetchall()
+    page = context.user_data.get('page', 1)
+    offset = (page - 1) * ITEMS_PER_PAGE
+    items = conn.execute(text('SELECT id, name, price FROM items WHERE status=:status LIMIT :limit OFFSET :offset'),
+                         {'status': 'available', 'limit': ITEMS_PER_PAGE, 'offset': offset}).fetchall()
 
     if not items:
         await update.message.reply_text("판매 중인 물품이 없습니다.")
         return
 
-    message = "판매 중인 물품 목록:\n"
+    message = "판매 중인 물품 목록 (페이지 {page}):\n"
     for item in items:
         message += f"{item.id}. {item.name} - {item.price} USDT\n"
+
+    navigation = "\n다음 페이지: /next | 이전 페이지: /prev"
+    await update.message.reply_text(message + navigation)
+
+# 페이지 이동 (다음/이전)
+async def next_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data['page'] = context.user_data.get('page', 1) + 1
+    await list_items(update, context)
+
+async def prev_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data['page'] = max(context.user_data.get('page', 1) - 1, 1)
+    await list_items(update, context)
     
-    await update.message.reply_text(message)
+    # 구매자가 물품을 선택했을 때 오퍼 전송
+async def send_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    item_id = int(update.message.text.strip())
+    buyer_id = update.message.from_user.id
 
-# /cancel 명령어 (등록 물품 취소)
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    seller_id = update.message.from_user.id
-    items = conn.execute(text('SELECT id, name FROM items WHERE seller_id=:seller_id AND status=:status'),
-                         {'seller_id': seller_id, 'status': 'available'}).fetchall()
+    # 선택한 물품의 정보를 조회
+    item = conn.execute(text('SELECT name, price, seller_id FROM items WHERE id=:id AND status=:status'),
+                        {'id': item_id, 'status': 'available'}).fetchone()
 
-    if not items:
-        await update.message.reply_text("취소할 물품이 없습니다.")
-        return ConversationHandler.END
+    if not item:
+        await update.message.reply_text("유효하지 않은 물품 ID입니다.")
+        return
 
-    keyboard = [[InlineKeyboardButton(item.name, callback_data=str(item.id))] for item in items]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text('취소할 물품을 선택해주세요.', reply_markup=reply_markup)
-    return WAITING_FOR_CANCEL_SELECTION
-
-# 물품 취소 처리
-async def confirm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    item_id = int(query.data)
-
-    conn.execute(text('UPDATE items SET status=:status WHERE id=:id'), {'status': 'cancelled', 'id': item_id})
+    # 오퍼 등록
+    conn.execute(text('INSERT INTO offers (item_id, buyer_id, status) VALUES (:item_id, :buyer_id, :status)'),
+                 {'item_id': item_id, 'buyer_id': buyer_id, 'status': 'pending'})
     conn.commit()
 
-    await query.edit_message_text(text="선택한 물품을 취소하였습니다.")
-    return ConversationHandler.END
+    await update.message.reply_text(f"{item.name}에 대한 구매 오퍼를 보냈습니다. 판매자가 수락할 때까지 기다려주세요.")
 
-# /ok 명령어 (거래 완료 확인)
-async def confirm_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("거래 완료 확인! 판매자에게 정산을 진행합니다.")
-
-# 메인 함수
-def main():
-    application = ApplicationBuilder().token(TELEGRAM_API_KEY).build()
-
-    sell_handler = ConversationHandler(
-        entry_points=[CommandHandler('sell', sell)],
-        states={
-            WAITING_FOR_ITEM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_name)],
-            WAITING_FOR_ITEM_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_price)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)]
+    # 판매자에게 오퍼 알림
+    await context.bot.send_message(
+        chat_id=item.seller_id,
+        text=f"'{item.name}'에 대한 구매 오퍼가 도착했습니다. 가격: {item.price} USDT\n수락하려면 /accept_{item_id}, 거절하려면 /reject_{item_id}을 입력하세요."
     )
 
-    cancel_handler = ConversationHandler(
-        entry_points=[CommandHandler('cancel', cancel)],
-        states={
-            WAITING_FOR_CANCEL_SELECTION: [CallbackQueryHandler(confirm_cancel)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)]
+# 판매자가 오퍼를 수락했을 때
+async def accept_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    item_id = int(update.message.text.split('_')[-1])
+    offer = conn.execute(text('SELECT buyer_id, item_id FROM offers WHERE item_id=:item_id AND status=:status'),
+                         {'item_id': item_id, 'status': 'pending'}).fetchone()
+
+    if not offer:
+        await update.message.reply_text("유효하지 않은 오퍼입니다.")
+        return
+
+    conn.execute(text('UPDATE offers SET status=:status WHERE item_id=:item_id'),
+                 {'status': 'accepted', 'item_id': item_id})
+    conn.execute(text('UPDATE items SET status=:status WHERE id=:id'),
+                 {'status': 'sold', 'id': item_id})
+    conn.commit()
+
+    # 구매자에게 결제 요청
+    await context.bot.send_message(
+        chat_id=offer.buyer_id,
+        text=f"판매자가 오퍼를 수락했습니다. {offer.item_id}번 물품의 결제를 진행해주세요.\n정확한 금액을 송금하면 자동으로 확인됩니다."
     )
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("list", list_items))
-    application.add_handler(CommandHandler("ok", confirm_purchase))
-    application.add_handler(sell_handler)
-    application.add_handler(cancel_handler)
+# 판매자가 오퍼를 거절했을 때
+async def reject_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    item_id = int(update.message.text.split('_')[-1])
+    offer = conn.execute(text('SELECT buyer_id FROM offers WHERE item_id=:item_id AND status=:status'),
+                         {'item_id': item_id, 'status': 'pending'}).fetchone()
 
-    application.run_polling()
+    if not offer:
+        await update.message.reply_text("유효하지 않은 오퍼입니다.")
+        return
 
-if __name__ == '__main__':
-    main()
+    conn.execute(text('UPDATE offers SET status=:status WHERE item_id=:item_id'),
+                 {'status': 'rejected', 'item_id': item_id})
+    conn.commit()
+
+    await context.bot.send_message(
+        chat_id=offer.buyer_id,
+        text="판매자가 오퍼를 거절했습니다. 다른 물품을 확인해주세요."
+    )
+
+# 결제 확인 및 처리 (테더 입금 확인)
+async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    item_id = int(update.message.text.split('_')[-1])
+    offer = conn.execute(text('SELECT buyer_id, item_id FROM offers WHERE item_id=:item_id AND status=:status'),
+                         {'item_id': item_id, 'status': 'accepted'}).fetchone()
+
+    if not offer:
+        await update.message.reply_text("유효하지 않은 거래입니다.")
+        return
+
+    # 결제 검증 로직 (예시: 실제 트론 블록체인 API를 이용해야 함)
+    # 결제 확인 후 처리 로직
+    is_payment_successful = True  # 실제 구현 필요
+
+    if is_payment_successful:
+        conn.execute(text('UPDATE offers SET status=:status WHERE item_id=:item_id'),
+                     {'status': 'completed', 'item_id': item_id})
+        conn.commit()
+
+        await context.bot.send_message(
+            chat_id=offer.buyer_id,
+            text="테더 입금이 확인되었습니다. 거래가 완료되었습니다."
+        )
+        await context.bot.send_message(
+            chat_id=offer.buyer_id,
+            text="판매자에게 물품을 전달받을 준비를 해주세요."
+        )
+
+# /rate 명령어 (거래 완료 후 평점 등록)
+async def rate_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        data = update.message.text.split()
+        user_id = int(data[1])
+        rating = int(data[2])
+
+        if not (1 <= rating <= 5):
+            raise ValueError("평점은 1에서 5 사이의 정수여야 합니다.")
+
+        conn.execute(text('INSERT INTO ratings (user_id, rating) VALUES (:user_id, :rating)'),
+                     {'user_id': user_id, 'rating': rating})
+        conn.commit()
+
+        await update.message.reply_text(f"{user_id}번 사용자에게 {rating}점을 부여하였습니다.")
+    except Exception as e:
+        await update.message.reply_text("평점 등록에 실패하였습니다. 올바른 형식으로 입력해주세요. (/rate [유저ID] [평점])")
