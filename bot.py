@@ -55,7 +55,7 @@ class Transaction(Base):
     buyer_id = Column(BigInteger, nullable=False)
     seller_id = Column(BigInteger, nullable=False)
     status = Column(String, default='pending')  # pending, accepted, completed, cancelled, rejected
-    session_id = Column(Text)  # 여기에는 판매자가 제공한 지갑주소 저장
+    session_id = Column(Text)  # 판매자가 /accept 시 입력한 지갑주소
     transaction_id = Column(Text, unique=True)  # 12자리 랜덤 거래 id
     amount = Column(DECIMAL, nullable=False)
     created_at = Column(TIMESTAMP, server_default=text('CURRENT_TIMESTAMP'))
@@ -63,27 +63,26 @@ class Transaction(Base):
 class Rating(Base):
     __tablename__ = 'ratings'
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(BigInteger, nullable=False)  # 평가 대상 사용자 (봇만 저장)
+    user_id = Column(BigInteger, nullable=False)  # 평가 대상 (봇만 보관)
     score = Column(Integer, nullable=False)
     review = Column(Text)
     created_at = Column(TIMESTAMP, server_default=text('CURRENT_TIMESTAMP'))
 
 Base.metadata.create_all(bind=engine)
 
-# TRC20 USDT 컨트랙트 주소 (예시)
+# TRC20 USDT 컨트랙트 주소 (예시; 실제 사용하는 컨트랙트 주소로 변경)
 USDT_CONTRACT = "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"
 
 # Tron 클라이언트 설정  
-provider = HTTPProvider(TRON_API)
-provider.session.headers.update({"TRON-PRO-API-KEY": TRON_API_KEY})
-client = Tron(provider=provider)
+# 이제 HTTPProvider는 headers 인자를 받지 않고, 대신 api_key 인자를 사용합니다.
+client = Tron(provider=HTTPProvider(TRON_API, api_key=TRON_API_KEY))
 
-# 송금 관련 함수
+# 송금 로직 구현 (USDT는 보통 6자리 소수점)
 def check_usdt_payment(expected_amount: float) -> bool:
     try:
         contract = client.get_contract(USDT_CONTRACT)
         balance = contract.functions.balanceOf(TRON_WALLET)
-        # USDT 보통 6자리 소수점
+        # 단위 변환: balance는 정수, USDT는 소수점 6자리
         return (balance / 1e6) >= expected_amount
     except Exception as e:
         logging.error(f"TRC20 입금 확인 오류: {e}")
@@ -120,9 +119,9 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
     WAITING_FOR_CONFIRMATION,  # /rate 평점 최종 입력 상태
 ) = range(7)
 
-ITEMS_PER_PAGE = 10  # 한 페이지에 보여줄 물품 수
+ITEMS_PER_PAGE = 10  # 한 페이지에 보여줄 상품 수
 
-# 거래 및 채팅 관련 전역 변수 (메모리 내 관리)
+# 거래 및 채팅 관련 전역 변수 (메모리 내 관리; 실제 운영 시 별도 스토리지 고려)
 active_chats = {}  # {transaction_id: (buyer_id, seller_id)}
 
 # 명령어 안내 메시지
@@ -361,7 +360,7 @@ async def accept_transaction(update: Update, context) -> None:
         return
     transaction_id = args[1].strip()
     seller_wallet = args[2].strip()
-    # 네트워크 정보는 생략하거나 args[3]로 받으세요. 여기서는 기본적으로 TRON으로 가정.
+    # 네트워크 정보는 args[3] (여기서는 TRON으로 가정)
     transaction = db_session.query(Transaction).filter_by(transaction_id=transaction_id, status="pending").first()
     if not transaction:
         await update.message.reply_text("유효한 거래 ID가 아닙니다." + command_guide())
@@ -369,14 +368,14 @@ async def accept_transaction(update: Update, context) -> None:
     if update.message.from_user.id != transaction.seller_id:
         await update.message.reply_text("판매자만 이 명령어를 사용할 수 있습니다." + command_guide())
         return
-    # 판매자가 제공한 지갑 주소를 저장 (session_id 필드 사용)
+    # 판매자가 제공한 지갑 주소 저장
     transaction.session_id = seller_wallet
     transaction.status = "accepted"
     db_session.commit()
     await update.message.reply_text(f"거래 ID {transaction_id}가 수락되었습니다. 네트워크: TRON\n구매자에게 송금 안내를 보냅니다." + command_guide())
     try:
         await context.bot.send_message(chat_id=transaction.buyer_id,
-                                       text=f"거래 ID {transaction_id}가 수락되었습니다. 해당 금액을 {TRON_WALLET}로 송금해주세요.\n예: 송금 시 TRC20 USDT로 송금하시기 바랍니다.")
+                                       text=f"거래 ID {transaction_id}가 수락되었습니다. 해당 금액을 {TRON_WALLET}로 송금해주세요.\n(송금 시 TRC20 USDT로 송금하시기 바랍니다.)")
     except Exception as e:
         logging.error(f"구매자 알림 전송 오류: {e}")
 
@@ -410,7 +409,6 @@ async def confirm_payment(update: Update, context) -> None:
         await update.message.reply_text("구매자만 이 명령어를 사용할 수 있습니다." + command_guide())
         return
     expected_amount = float(transaction.amount)
-    # 송금 전, 봇의 지갑에 입금된 USDT 확인 (실제 입금 확인은 별도 모니터링 필요)
     if not check_usdt_payment(expected_amount):
         await update.message.reply_text("입금이 확인되지 않았습니다. 송금이 완료되지 않았습니다." + command_guide())
         return
@@ -449,7 +447,6 @@ async def save_rating(update: Update, context) -> int:
             return WAITING_FOR_CONFIRMATION
         transaction_id = context.user_data.get('transaction_id')
         transaction = db_session.query(Transaction).filter_by(transaction_id=transaction_id).first()
-        # 평가 대상: 구매자는 판매자, 판매자는 구매자 (익명 처리)
         if update.message.from_user.id == transaction.buyer_id:
             target_id = transaction.seller_id
         else:
@@ -574,7 +571,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("confirm", confirm_payment))
     app.add_handler(CommandHandler("off", off_transaction))
     app.add_handler(CommandHandler("chat", start_chat))
-    # /exit는 대화 흐름의 fallbacks에서 처리
+    # /exit는 대화 흐름 핸들러의 fallbacks에서 처리
 
     # 대화 흐름 핸들러 등록
     app.add_handler(sell_handler)
