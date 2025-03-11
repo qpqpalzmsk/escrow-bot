@@ -3,16 +3,27 @@ app = "escrow-bot"
 kill_signal = "SIGINT"
 kill_timeout = 5
 
-
 [experimental]
   auto_rollback = true
 
 [[services]]
-  # 텔레그램 봇은 polling 방식이므로 포트를 사용하지 않지만,
-  # fly.io에서는 내부적으로 health check 등을 위해 포트를 열 수 있습니다.
+  # 내부 포트는 봇이 polling 방식이라 크게 중요하지 않으나, health check 등을 위해 필요합니다.
   internal_port = 8080
   protocol = "tcp"
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
   [services.concurrency]
     type = "connections"
-    soft_limit = 25
-    hard_limit = 30
+    soft_limit = 50      # 증가된 동시 연결 제한
+    hard_limit = 60
+
+[env]
+  # 필요한 환경 변수들은 여기에서 설정할 수 있습니다.
+  # 예: DATABASE_URL, TELEGRAM_API_KEY 등 (보안상 시크릿으로 관리하세요)
+
+[resources]
+  # 이 부분에서 할당할 리소스를 조정합니다.
+  # 예를 들어, dedicated CPU와 2GB 메모리를 할당합니다.
+  cpu = "dedicated"
+  memory = "2GB"
