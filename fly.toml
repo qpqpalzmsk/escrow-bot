@@ -4,18 +4,18 @@ kill_signal = "SIGINT"
 kill_timeout = 5
 
 [build]
-  image = "registry.fly.io/escrow-bot:deployment-{{your_commit_hash}}"
+  image = "registry.fly.io/escrow-bot:deployment-cuzcuz"  # 실제 태그로 변경
 
-
-[experimental]
-  auto_rollback = true
+[env]
+  TELEGRAM_API_KEY = "your_telegram_bot_token"
+  DATABASE_URL = "postgresql://postgres:your_password@escrow-bot-db.flycast:5432/escrow_bot?sslmode=disable"
+  TRON_API = "https://api.trongrid.io"
+  TRON_API_KEY = "your_tron_api_key"
+  PRIVATE_KEY = "your_private_key"
 
 [[services]]
-  # 텔레그램 봇은 polling 방식이므로 포트를 사용하지 않지만,
-  # fly.io에서는 내부적으로 health check 등을 위해 포트를 열 수 있습니다.
   internal_port = 8080
   protocol = "tcp"
-  [services.concurrency]
-    type = "connections"
-    soft_limit = 25
-    hard_limit = 30
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
