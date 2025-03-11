@@ -10,7 +10,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 from sqlalchemy import create_engine, Column, Integer, String, DECIMAL, BigInteger, Text, TIMESTAMP, text
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.ext.declarative import declarative_base  # (주의: SQLAlchemy 2.0 이후에는 sqlalchemy.orm.declarative_base() 사용 권장)
 from sqlalchemy.orm import sessionmaker
 
 from tronpy import Tron
@@ -18,7 +18,7 @@ from tronpy.providers import HTTPProvider
 
 # 환경 변수 (Fly.io 시크릿 등에서 주입)
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
-# DATABASE_URL 예: "postgresql://postgres:비밀번호@escrow-bot-db.flycast:5432/escrow_bot?sslmode=disable"
+# DATABASE_URL 예시: "postgresql://postgres:비밀번호@escrow-bot-db.flycast:5432/escrow_bot?sslmode=disable"
 DATABASE_URL = os.getenv("DATABASE_URL")
 TRON_API = os.getenv("TRON_API")            # 예: "https://api.trongrid.io"
 TRON_API_KEY = os.getenv("TRON_API_KEY")      # TronGrid API Key
@@ -72,15 +72,15 @@ class Rating(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# Tron 클라이언트 설정 (api_key 인자를 사용)
+# Tron 클라이언트 설정 – HTTPProvider는 이제 api_key 인자를 받습니다.
 client = Tron(provider=HTTPProvider(TRON_API, api_key=TRON_API_KEY))
 
-# 송금(USDT 전송) 로직
+# 송금(USDT 전송) 로직 구현 (USDT는 소수점 6자리 단위)
 def check_usdt_payment(expected_amount: float) -> bool:
     try:
         contract = client.get_contract(USDT_CONTRACT)
         balance = contract.functions.balanceOf(TRON_WALLET)
-        # USDT는 소수점 6자리 단위
+        # 정수 값을 소수점 단위로 변환
         return (balance / 1e6) >= expected_amount
     except Exception as e:
         logging.error(f"TRC20 입금 확인 오류: {e}")
@@ -119,9 +119,10 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 ITEMS_PER_PAGE = 10  # 한 페이지에 보여줄 상품 수
 
-# 거래 및 채팅 관련 전역 변수 (메모리 내 관리)
+# 거래 및 채팅 관련 전역 변수 (운영 시 별도 스토리지 고려)
 active_chats = {}  # {transaction_id: (buyer_id, seller_id)}
 
+# 명령어 안내 메시지
 def command_guide() -> str:
     return (
         "\n\n사용 가능한 명령어:\n"
@@ -194,7 +195,7 @@ async def list_items(update: Update, context) -> None:
     start = (page - 1) * ITEMS_PER_PAGE
     end = start + ITEMS_PER_PAGE
     page_items = items[start:end]
-    # 매핑: 화면에 보이는 번호 -> 실제 item.id
+    # 매핑: 화면에 보이는 번호 -> 실제 item.id (번호는 페이지마다 새로 매핑)
     context.user_data['list_mapping'] = {str(idx): item.id for idx, item in enumerate(page_items, start=1)}
     message = f"구매 가능한 상품 목록 (페이지 {page}/{total_pages}):\n"
     for idx, item in enumerate(page_items, start=1):
@@ -290,7 +291,7 @@ async def offer_item(update: Update, context) -> None:
     db_session.add(transaction)
     db_session.commit()
     await update.message.reply_text(
-        f"상품 '{item.name}'에 대한 거래 요청이 전송되었습니다! 거래 ID: {transaction_id}\n※ 송금 시, 반드시 거래 ID를 메모(참조)에 입력해주세요." + command_guide()
+        f"상품 '{item.name}'에 대한 거래 요청이 전송되었습니다! 거래 ID: {transaction_id}\n※ 송금 시 반드시 거래 ID를 메모(참조)란에 입력해주세요." + command_guide()
     )
     try:
         await context.bot.send_message(chat_id=seller_id,
@@ -359,7 +360,7 @@ async def accept_transaction(update: Update, context) -> None:
     if update.message.from_user.id != transaction.seller_id:
         await update.message.reply_text("판매자만 이 명령어를 사용할 수 있습니다." + command_guide())
         return
-    transaction.session_id = seller_wallet  # 판매자가 제공한 출금(송금) 지갑 주소 저장
+    transaction.session_id = seller_wallet  # 판매자가 제공한 지갑 주소 저장
     transaction.status = "accepted"
     db_session.commit()
     await update.message.reply_text(f"거래 ID {transaction_id}가 수락되었습니다. 네트워크는 TRC20 USDT입니다.\n구매자에게 송금 안내를 보냅니다." + command_guide())
@@ -437,7 +438,7 @@ async def save_rating(update: Update, context) -> int:
             return WAITING_FOR_CONFIRMATION
         transaction_id = context.user_data.get('transaction_id')
         transaction = db_session.query(Transaction).filter_by(transaction_id=transaction_id).first()
-        # 평가 대상: 구매자는 판매자, 판매자는 구매자
+        # 평가 대상: 구매자는 판매자, 판매자는 구매자 (단, 사용자 ID는 봇 내부에만 저장)
         if update.message.from_user.id == transaction.buyer_id:
             target_id = transaction.seller_id
         else:
