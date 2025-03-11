@@ -28,14 +28,14 @@ from tronpy.providers import HTTPProvider
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")  # 실제 DSN으로 교체하세요.
 TRON_API = os.getenv("TRON_API")            # 예: "https://api.trongrid.io"
-TRON_API_KEY = os.getenv("TRON_API_KEY")      # 실제 API Key (옵션, 유료 플랜)
+TRON_API_KEY = os.getenv("TRON_API_KEY")      # 실제 API Key (유료 플랜 사용 시 필요)
 TRON_WALLET = os.getenv("TRON_WALLET", "TT8AZ3dCpgWJQSw9EXhhyR3uKj81jXxbRB")  # 봇의 Tron 지갑 주소
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")        # 봇 지갑의 개인키
 
 # TRC20 USDT 컨트랙트 주소 (메인넷 – 본인이 확인한 주소)
 USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 
-# 관리자(운영자) 전용 텔레그램 ID (환경변수나 하드코딩)
+# 관리자(운영자) 전용 텔레그램 ID
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "999999999"))
 
 # ==============================
@@ -79,8 +79,8 @@ class Transaction(Base):
     item_id = Column(Integer, nullable=False)
     buyer_id = Column(BigInteger, nullable=False)
     seller_id = Column(BigInteger, nullable=False)
-    status = Column(String, default='pending')
-    session_id = Column(Text)  # 판매자/환불용 지갑
+    status = Column(String, default='pending')  # pending, accepted, completed, cancelled, rejected
+    session_id = Column(Text)  # 판매자 지갑 주소 (또는 환불용 구매자 지갑)
     transaction_id = Column(Text, unique=True)  # 12자리 랜덤 거래 id
     amount = Column(DECIMAL, nullable=False)
     created_at = Column(TIMESTAMP, server_default=text('CURRENT_TIMESTAMP'))
@@ -99,7 +99,7 @@ Base.metadata.create_all(bind=engine)
 # Tron 클라이언트 설정
 client = Tron(provider=HTTPProvider(TRON_API, api_key=TRON_API_KEY))
 
-# 중개 수수료 정의
+# 중개 수수료
 NORMAL_COMMISSION_RATE = 0.05
 OVERSEND_COMMISSION_RATE = 0.075
 
@@ -143,7 +143,7 @@ def parse_trc20_transfer_amount_and_memo(tx_detail: dict) -> (float, str):
         return 0, ""
 
 # ==============================
-# 송금(USDT 전송) 및 검증 로직
+# 송금 및 검증 로직
 def verify_deposit(expected_amount: float, txid: str, internal_txid: str) -> (bool, float):
     try:
         tx_detail = fetch_transaction_detail(txid)
@@ -188,7 +188,7 @@ def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
         raise
 
 # ==============================
-# 자동 송금 확인 관련 로직 (TronGrid 기반)
+# 자동 송금 확인 (TronGrid 기반)
 def auto_verify_transaction(tx: Transaction) -> (bool, float):
     try:
         recent_txs = fetch_recent_transactions(TRON_WALLET, limit=30)
@@ -252,6 +252,10 @@ async def auto_verify_deposits(context):
         logging.error(f"자동 확인 작업 오류: {e}")
     finally:
         session.close()
+
+# ==============================
+# 로깅 설정
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 # ==============================
 # 대화 상태 상수
@@ -793,7 +797,7 @@ async def relay_message(update: Update, context) -> None:
         logging.error(f"채팅 메시지 전송 오류: {e}")
 
 # ==============================
-# 11. /off: 거래 중단 (구매자/판매자 모두)
+# 11. /off: 거래 중단
 async def off_transaction(update: Update, context) -> None:
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -826,7 +830,7 @@ async def off_transaction(update: Update, context) -> None:
         session.close()
 
 # ==============================
-# 12. /refund: 구매자 환불 요청 (구매자 전용)
+# 12. /refund: 구매자 환불 요청
 async def refund_request(update: Update, context) -> int:
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -881,7 +885,7 @@ async def process_refund(update: Update, context) -> int:
         return WAITING_FOR_REFUND_WALLET
 
 # ==============================
-# 13. /warexit: 관리자 전용 강제 종료
+# 13. /warexit: 관리자 강제 종료
 async def warexit_command(update: Update, context) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다." + command_guide())
@@ -927,7 +931,7 @@ async def error_handler(update: object, context) -> None:
         await update.message.reply_text("오류가 발생했습니다. 다시 시도해주세요." + command_guide())
 
 # ==============================
-# 대화 흐름 핸들러 설정
+# 대화형 핸들러 설정
 sell_handler = ConversationHandler(
     entry_points=[CommandHandler("sell", sell_command)],
     states={
@@ -967,7 +971,6 @@ refund_handler = ConversationHandler(
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_API_KEY).build()
 
-    # 개별 명령어 핸들러 등록
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_items_command))
     app.add_handler(CommandHandler("next", next_page))
@@ -983,12 +986,10 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("exit", exit_to_start))
     app.add_handler(refund_handler)
 
-    # 대화형 핸들러 등록
     app.add_handler(sell_handler)
     app.add_handler(cancel_handler)
     app.add_handler(rate_handler)
 
-    # 파일 및 텍스트 메시지 중계 (채팅)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 
     app.add_error_handler(error_handler)
