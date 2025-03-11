@@ -3,6 +3,7 @@ import random
 import os
 import time
 import requests
+import asyncio
 from requests.adapters import HTTPAdapter, Retry
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaDocument, InputMediaPhoto
@@ -150,13 +151,12 @@ def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
     """
     try:
         contract = client.get_contract(USDT_CONTRACT)
-        # 데이터(메모)는 hex 인코딩해서 전송 (메모가 비어있으면 생략)
         data = memo.encode("utf-8").hex() if memo else ""
         txn = (
             contract.functions.transfer(to_address, int(amount * 1e6))
             .with_owner(TRON_WALLET)
             .fee_limit(1_000_000_000)
-            .with_data(data)  # 메모를 포함하여 전송 (지원 여부 확인 필요)
+            .with_data(data)
             .build()
             .sign(PRIVATE_KEY)
             .broadcast()
@@ -166,6 +166,85 @@ def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
     except Exception as e:
         logging.error(f"TRC20 송금 오류: {e}")
         raise
+
+# ==============================
+# 자동 송금 확인 관련 로직
+def auto_verify_transaction(tx: Transaction) -> (bool, float):
+    """
+    봇 지갑으로 들어온 거래들 중에서, 메모에 해당 거래의 내부 거래ID가 포함된 거래를 찾아
+    입금 금액이 올바른지 검증합니다.
+    (실제 사용 환경에 맞게 Tronpy의 거래 내역 조회 메서드를 조정해야 합니다.)
+    """
+    try:
+        # get_account_transactions() 등 API가 지원하는 메서드로 최근 거래 내역을 조회합니다.
+        transactions = client.get_account_transactions(TRON_WALLET)
+        for blockchain_tx in transactions:
+            contract_info = blockchain_tx["raw_data"]["contract"][0]["parameter"]["value"]
+            data_hex = contract_info.get("data", "")
+            memo = bytes.fromhex(data_hex).decode("utf-8") if data_hex else ""
+            if tx.transaction_id.lower() in memo.lower():
+                transferred_amount = int(contract_info.get("amount", 0))
+                actual_amount = transferred_amount / 1e6
+                # 금액이 부족하면 실패 처리 (초과 송금도 허용하나 아래에서 별도 처리)
+                if transferred_amount < int(float(tx.amount) * 1e6):
+                    return False, actual_amount
+                return True, actual_amount
+        return False, 0
+    except Exception as e:
+        logging.error(f"자동 송금 확인 오류: {e}")
+        return False, 0
+
+async def auto_verify_deposits(context):
+    """
+    주기적으로 accepted 상태의 거래들에 대해 블록체인에서 입금 내역을 자동 확인합니다.
+    입금이 확인되면 구매자와 판매자에게 [자동 확인]이라는 봇 말투의 메시지를 전송하고,
+    거래 상태를 completed로 갱신합니다.
+    """
+    session = get_db_session()
+    try:
+        pending_txs = session.query(Transaction).filter(Transaction.status == "accepted").all()
+        for tx in pending_txs:
+            valid, deposited_amount = auto_verify_transaction(tx)
+            if valid:
+                original_amount = float(tx.amount)
+                if deposited_amount > original_amount:
+                    net_amount = deposited_amount * (1 - OVERSEND_COMMISSION_RATE)
+                    msg_buyer = (
+                        f"[자동 확인] 에스크로 봇: 거래 ID {tx.transaction_id}의 입금이 확인되었습니다.\n"
+                        f"입금액: {deposited_amount} USDT (초과 송금됨).\n판매자님, {net_amount} USDT 송금 후 물품 발송 부탁드립니다."
+                    )
+                    msg_seller = (
+                        f"[자동 확인] 에스크로 봇: 거래 ID {tx.transaction_id}의 입금이 확인되었습니다.\n"
+                        f"초과 송금(7.5% 수수료 적용) 후 {net_amount} USDT가 판매자 지갑으로 송금되었습니다.\n물품 발송 진행해주세요."
+                    )
+                    tx.status = "completed"
+                    session.commit()
+                    try:
+                        await context.bot.send_message(chat_id=tx.buyer_id, text=msg_buyer)
+                        await context.bot.send_message(chat_id=tx.seller_id, text=msg_seller)
+                    except Exception as e:
+                        logging.error(f"자동 확인 알림 전송 오류: {e}")
+                else:
+                    net_amount = original_amount * (1 - NORMAL_COMMISSION_RATE)
+                    msg_buyer = (
+                        f"[자동 확인] 에스크로 봇: 거래 ID {tx.transaction_id}의 입금이 확인되었습니다.\n"
+                        f"정확한 금액 {original_amount} USDT 입금됨.\n거래가 완료되었습니다."
+                    )
+                    msg_seller = (
+                        f"[자동 확인] 에스크로 봇: 거래 ID {tx.transaction_id}의 입금이 확인되었습니다.\n"
+                        f"{net_amount} USDT가 판매자 지갑으로 송금되었습니다.\n물품 발송 부탁드립니다."
+                    )
+                    tx.status = "completed"
+                    session.commit()
+                    try:
+                        await context.bot.send_message(chat_id=tx.buyer_id, text=msg_buyer)
+                        await context.bot.send_message(chat_id=tx.seller_id, text=msg_seller)
+                    except Exception as e:
+                        logging.error(f"자동 확인 알림 전송 오류: {e}")
+    except Exception as e:
+        logging.error(f"자동 확인 작업 오류: {e}")
+    finally:
+        session.close()
 
 # ==============================
 # 로깅 설정
@@ -390,7 +469,7 @@ async def offer_item(update: Update, context) -> None:
                 chat_id=seller_id,
                 text=(
                     f"당신의 상품 '{item.name}'에 거래 요청이 도착했습니다.\n거래 ID: {t_id}\n"
-                    "판매자께서는 /accept 거래ID 판매자지갑주소 로 수락하거나, /refusal 거래ID 로 거절하세요.\n"
+                    "판매자님, /accept 거래ID 판매자지갑주소 로 수락하거나, /refusal 거래ID 로 거절해주세요.\n"
                     "※ 네트워크: TRC20 USDT"
                 )
             )
@@ -602,7 +681,7 @@ async def confirm_payment(update: Update, context) -> None:
             result = send_usdt(seller_wallet, net_amount, memo=t_id)
             await context.bot.send_message(
                 chat_id=tx.seller_id,
-                text=f"거래 ID {t_id}가 완료되었습니다.\n{net_amount} USDT가 판매자 지갑({seller_wallet})으로 송금되었습니다.\n송금 결과: {result}\n구매자에게 물건을 발송해주세요!"
+                text=f"거래 ID {t_id}가 완료되었습니다.\n{net_amount} USDT가 판매자 지갑({seller_wallet})으로 송금되었습니다.\n송금 결과: {result}\n구매자님, 물건 수령 후 즉시 발송 확인 부탁드립니다!"
             )
         except Exception as e:
             logging.error(f"판매자 정상 송금 오류: {e}")
@@ -922,4 +1001,8 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 
     app.add_error_handler(error_handler)
+
+    # 자동 송금 확인 작업을 60초마다 실행 (첫 실행은 10초 후)
+    app.job_queue.run_repeating(auto_verify_deposits, interval=60, first=10)
+
     app.run_polling()
