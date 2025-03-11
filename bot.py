@@ -26,16 +26,17 @@ from tronpy.providers import HTTPProvider
 # ==============================
 # 환경 변수 설정 (Fly.io 시크릿 등에서 주입)
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")  # 실제 DSN으로 교체하세요.
+DATABASE_URL = os.getenv("DATABASE_URL")  # 예: "postgres://user:pass@host:5432/dbname"
 TRON_API = os.getenv("TRON_API")            # 예: "https://api.trongrid.io"
-TRON_API_KEY = os.getenv("TRON_API_KEY")      # 실제 API Key (유료 플랜 사용 시 필요)
-TRON_WALLET = os.getenv("TRON_WALLET", "TT8AZ3dCpgWJQSw9EXhhyR3uKj81jXxbRB")  # 봇의 Tron 지갑 주소
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")        # 봇 지갑의 개인키
+TRON_API_KEY = os.getenv("TRON_API_KEY")      # 유료 플랜 등 필요 시 설정
+TRON_WALLET = os.getenv("TRON_WALLET", "TT8AZ3dCpgWJQSw9EXhhyR3uKj81jXxbRB")
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+# 추가: 송금 비밀번호 (트론링크의 경우 지갑 비밀번호가 필요한 경우 사용)
+TRON_PASSWORD = os.getenv("TRON_PASSWORD")
+if not TRON_PASSWORD:
+    logging.error("TRON_PASSWORD 환경변수가 설정되어 있지 않습니다. 반드시 설정하세요.")
 
-# TRC20 USDT 컨트랙트 주소 (메인넷 – 본인이 확인한 주소)
 USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
-
-# 관리자(운영자) 전용 텔레그램 ID
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "999999999"))
 
 # ==============================
@@ -96,8 +97,9 @@ class Rating(Base):
 Base.metadata.create_all(bind=engine)
 
 # ==============================
-# Tron 클라이언트 설정
-client = Tron(provider=HTTPProvider(TRON_API, api_key=TRON_API_KEY))
+# Tron 클라이언트 설정 (TRON_API의 끝에 '/'가 없도록 정리)
+TRON_API_CLEAN = TRON_API.rstrip("/")
+client = Tron(provider=HTTPProvider(TRON_API_CLEAN, api_key=TRON_API_KEY))
 
 # 중개 수수료
 NORMAL_COMMISSION_RATE = 0.05
@@ -106,7 +108,7 @@ OVERSEND_COMMISSION_RATE = 0.075
 # ==============================
 # TronGrid API 유틸리티 함수
 def fetch_recent_transactions(address: str, limit: int = 30) -> list:
-    url = f"{TRON_API}/v1/accounts/{address}/transactions"
+    url = f"{TRON_API_CLEAN}/v1/accounts/{address}/transactions"
     headers = {"Accept": "application/json"}
     if TRON_API_KEY:
         headers["TRON-PRO-API-KEY"] = TRON_API_KEY
@@ -117,7 +119,7 @@ def fetch_recent_transactions(address: str, limit: int = 30) -> list:
     return data.get("data", [])
 
 def fetch_transaction_detail(txid: str) -> dict:
-    url = f"{TRON_API}/v1/transactions/{txid}"
+    url = f"{TRON_API_CLEAN}/v1/transactions/{txid}"
     headers = {"Accept": "application/json"}
     if TRON_API_KEY:
         headers["TRON-PRO-API-KEY"] = TRON_API_KEY
@@ -169,6 +171,9 @@ def check_usdt_payment(expected_amount: float, txid: str = "", internal_txid: st
         return (False, 0)
 
 def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
+    # 송금 전에 TRON_PASSWORD가 올바른지 체크 (실제 지갑 서비스에서는 비밀번호 입력 절차가 있을 수 있으므로)
+    if not TRON_PASSWORD:
+        raise Exception("TRON_PASSWORD 환경변수가 설정되어 있지 않습니다.")
     try:
         contract = client.get_contract(USDT_CONTRACT)
         data = memo.encode("utf-8").hex() if memo else ""
@@ -178,7 +183,7 @@ def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
             .fee_limit(1_000_000_000)
             .with_data(data)
             .build()
-            .sign(PRIVATE_KEY)
+            .sign(PRIVATE_KEY)  # 실제 서명 시 TRON_PASSWORD로 추가 검증 가능 (여기선 PRIVATE_KEY 사용)
             .broadcast()
         )
         result = txn.wait()
@@ -461,7 +466,8 @@ async def offer_item(update: Update, context) -> None:
         seller_id = item.seller_id
 
         t_id = generate_transaction_id()
-        new_tx = Transaction(item_id=item.id, buyer_id=buyer_id, seller_id=seller_id, amount=item.price, transaction_id=t_id)
+        new_tx = Transaction(item_id=item.id, buyer_id=buyer_id, seller_id=seller_id,
+                             amount=item.price, transaction_id=t_id)
         session.add(new_tx)
         session.commit()
 
@@ -534,7 +540,9 @@ async def cancel_item(update: Update, context) -> int:
             try:
                 item = session.query(Item).filter_by(id=int(identifier), seller_id=seller_id, status="available").first()
             except ValueError:
-                item = session.query(Item).filter(Item.name.ilike(f"%{identifier}%"), Item.seller_id == seller_id, Item.status == "available").first()
+                item = session.query(Item).filter(Item.name.ilike(f"%{identifier}%"), 
+                                                  Item.seller_id == seller_id, 
+                                                  Item.status == "available").first()
         if not item:
             await update.message.reply_text("유효한 상품 번호/이름이 없거나 취소 불가능한 상태입니다." + command_guide())
             return WAITING_FOR_CANCEL_ID
@@ -767,7 +775,9 @@ async def start_chat(update: Update, context) -> None:
             return
         active_chats[t_id] = (tx.buyer_id, tx.seller_id)
         context.user_data["current_chat_tx"] = t_id
-        await update.message.reply_text(f"거래 ID {t_id}에 대한 익명 채팅을 시작합니다.\n텍스트나 파일(사진/문서 등)을 전송하면 상대방에게 전달됩니다." + command_guide())
+        await update.message.reply_text(
+            f"거래 ID {t_id}에 대한 익명 채팅을 시작합니다.\n텍스트나 파일(사진/문서 등)을 전송하면 상대방에게 전달됩니다." + command_guide()
+        )
     except Exception as e:
         logging.error(f"/chat 오류: {e}")
         await update.message.reply_text("채팅 시작 중 오류가 발생했습니다." + command_guide())
@@ -971,6 +981,7 @@ refund_handler = ConversationHandler(
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_API_KEY).build()
 
+    # 개별 명령어 핸들러 등록
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_items_command))
     app.add_handler(CommandHandler("next", next_page))
@@ -986,10 +997,12 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("exit", exit_to_start))
     app.add_handler(refund_handler)
 
+    # 대화형 핸들러 등록
     app.add_handler(sell_handler)
     app.add_handler(cancel_handler)
     app.add_handler(rate_handler)
 
+    # 파일 및 텍스트 메시지 중계 (채팅)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 
     app.add_error_handler(error_handler)
