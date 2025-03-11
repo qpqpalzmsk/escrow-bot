@@ -28,8 +28,8 @@ from tronpy.providers import HTTPProvider
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")  # 실제 DSN으로 교체하세요.
 TRON_API = os.getenv("TRON_API")            # 예: "https://api.trongrid.io"
-TRON_API_KEY = os.getenv("TRON_API_KEY")      # 실제 API Key
-TRON_WALLET = "TT8AZ3dCpgWJQSw9EXhhyR3uKj81jXxbRB"  # 봇의 Tron 지갑 주소 (TRC20 USDT 전용)
+TRON_API_KEY = os.getenv("TRON_API_KEY")      # 실제 API Key (옵션, 유료 플랜)
+TRON_WALLET = os.getenv("TRON_WALLET", "TT8AZ3dCpgWJQSw9EXhhyR3uKj81jXxbRB")  # 봇의 Tron 지갑 주소
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")        # 봇 지갑의 개인키
 
 # TRC20 USDT 컨트랙트 주소 (메인넷 – 본인이 확인한 주소)
@@ -66,11 +66,11 @@ def get_db_session():
 class Item(Base):
     __tablename__ = 'items'
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(Text, nullable=False)      # 한글 지원
+    name = Column(Text, nullable=False)
     price = Column(DECIMAL, nullable=False)
     seller_id = Column(BigInteger, nullable=False)
-    status = Column(String, default='available')  # available, sold 등
-    type = Column(String, nullable=False)         # 디지털 / 현물
+    status = Column(String, default='available')
+    type = Column(String, nullable=False)
     created_at = Column(TIMESTAMP, server_default=text('CURRENT_TIMESTAMP'))
 
 class Transaction(Base):
@@ -79,16 +79,16 @@ class Transaction(Base):
     item_id = Column(Integer, nullable=False)
     buyer_id = Column(BigInteger, nullable=False)
     seller_id = Column(BigInteger, nullable=False)
-    status = Column(String, default='pending')      # pending, accepted, completed, cancelled, rejected
-    session_id = Column(Text)                       # 판매자 /accept 시 입력한 지갑 주소 또는 환불용 구매자 지갑
-    transaction_id = Column(Text, unique=True)      # 12자리 랜덤 거래 id
+    status = Column(String, default='pending')
+    session_id = Column(Text)  # 판매자/환불용 지갑
+    transaction_id = Column(Text, unique=True)  # 12자리 랜덤 거래 id
     amount = Column(DECIMAL, nullable=False)
     created_at = Column(TIMESTAMP, server_default=text('CURRENT_TIMESTAMP'))
 
 class Rating(Base):
     __tablename__ = 'ratings'
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(BigInteger, nullable=False)    # 평가 대상 (봇만 보관)
+    user_id = Column(BigInteger, nullable=False)
     score = Column(Integer, nullable=False)
     review = Column(Text)
     created_at = Column(TIMESTAMP, server_default=text('CURRENT_TIMESTAMP'))
@@ -96,31 +96,60 @@ class Rating(Base):
 Base.metadata.create_all(bind=engine)
 
 # ==============================
-# Tron 클라이언트 설정 (HTTPProvider는 이제 api_key 인자를 사용)
+# Tron 클라이언트 설정
 client = Tron(provider=HTTPProvider(TRON_API, api_key=TRON_API_KEY))
 
 # 중개 수수료 정의
-NORMAL_COMMISSION_RATE = 0.05   # 기본 5%
-OVERSEND_COMMISSION_RATE = 0.075  # 초과 송금 시 총 7.5%
+NORMAL_COMMISSION_RATE = 0.05
+OVERSEND_COMMISSION_RATE = 0.075
+
+# ==============================
+# TronGrid API 유틸리티 함수
+def fetch_recent_transactions(address: str, limit: int = 30) -> list:
+    url = f"{TRON_API}/v1/accounts/{address}/transactions"
+    headers = {"Accept": "application/json"}
+    if TRON_API_KEY:
+        headers["TRON-PRO-API-KEY"] = TRON_API_KEY
+    params = {"limit": limit, "only_confirmed": "true"}
+    resp = http_session.get(url, headers=headers, params=params)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("data", [])
+
+def fetch_transaction_detail(txid: str) -> dict:
+    url = f"{TRON_API}/v1/transactions/{txid}"
+    headers = {"Accept": "application/json"}
+    if TRON_API_KEY:
+        headers["TRON-PRO-API-KEY"] = TRON_API_KEY
+    resp = http_session.get(url, headers=headers)
+    resp.raise_for_status()
+    data = resp.json()
+    arr = data.get("data", [])
+    return arr[0] if arr else {}
+
+def parse_trc20_transfer_amount_and_memo(tx_detail: dict) -> (float, str):
+    try:
+        contracts = tx_detail.get("raw_data", {}).get("contract", [])
+        if not contracts:
+            return 0, ""
+        first_contract = contracts[0].get("parameter", {}).get("value", {})
+        transferred_amount = first_contract.get("amount", 0)
+        data_hex = first_contract.get("data", "")
+        memo = bytes.fromhex(data_hex).decode("utf-8") if data_hex else ""
+        actual_amount = transferred_amount / 1e6
+        return actual_amount, memo
+    except Exception as e:
+        logging.error(f"트랜잭션 파싱 오류: {e}")
+        return 0, ""
 
 # ==============================
 # 송금(USDT 전송) 및 검증 로직
 def verify_deposit(expected_amount: float, txid: str, internal_txid: str) -> (bool, float):
-    """
-    블록체인에서 거래(txid)를 조회하여 전송 금액과 메모(참조)에 internal_txid(거래ID)가 포함되어 있는지 검증.
-    반환: (검증 성공 여부, 실제 입금된 USDT 금액)
-    """
     try:
-        tx = client.get_transaction(txid)
-        contract_info = tx["raw_data"]["contract"][0]["parameter"]["value"]
-        transferred_amount = int(contract_info.get("amount", 0))
-        data_hex = contract_info.get("data", "")
-        memo = bytes.fromhex(data_hex).decode("utf-8") if data_hex else ""
-        actual_amount = transferred_amount / 1e6
-        # 정확한 금액 검증
-        if transferred_amount != int(expected_amount * 1e6):
+        tx_detail = fetch_transaction_detail(txid)
+        actual_amount, memo = parse_trc20_transfer_amount_and_memo(tx_detail)
+        if abs(actual_amount - expected_amount) > 1e-6:
             return (False, actual_amount)
-        # 메모에 내부 거래ID가 반드시 포함되어야 함 (대소문자 구분 없이)
         if internal_txid.lower() not in memo.lower():
             return (False, actual_amount)
         return (True, actual_amount)
@@ -129,10 +158,6 @@ def verify_deposit(expected_amount: float, txid: str, internal_txid: str) -> (bo
         return (False, 0)
 
 def check_usdt_payment(expected_amount: float, txid: str = "", internal_txid: str = "") -> (bool, float):
-    """
-    txid와 internal_txid가 제공되면 verify_deposit()으로 검증하고,
-    그렇지 않으면 현재 봇 지갑의 USDT 잔액을 확인합니다.
-    """
     if txid and internal_txid:
         return verify_deposit(expected_amount, txid, internal_txid)
     try:
@@ -144,11 +169,6 @@ def check_usdt_payment(expected_amount: float, txid: str = "", internal_txid: st
         return (False, 0)
 
 def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
-    """
-    to_address로 amount(USDT)를 송금합니다.
-    memo(거래ID 등)를 포함시키려면 해당 정보를 hex로 인코딩하여 data 필드에 포함할 수 있습니다.
-    (현재 tronpy에서는 data 인자 지원이 제한적이므로, 별도 로직 필요할 수 있음)
-    """
     try:
         contract = client.get_contract(USDT_CONTRACT)
         data = memo.encode("utf-8").hex() if memo else ""
@@ -161,45 +181,32 @@ def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
             .sign(PRIVATE_KEY)
             .broadcast()
         )
-        result = txn.wait()  # 송금 결과 대기
+        result = txn.wait()
         return result
     except Exception as e:
         logging.error(f"TRC20 송금 오류: {e}")
         raise
 
 # ==============================
-# 자동 송금 확인 관련 로직
+# 자동 송금 확인 관련 로직 (TronGrid 기반)
 def auto_verify_transaction(tx: Transaction) -> (bool, float):
-    """
-    봇 지갑으로 들어온 거래들 중에서, 메모에 해당 거래의 내부 거래ID가 포함된 거래를 찾아
-    입금 금액이 올바른지 검증합니다.
-    (실제 사용 환경에 맞게 Tronpy의 거래 내역 조회 메서드를 조정해야 합니다.)
-    """
     try:
-        # get_account_transactions() 등 API가 지원하는 메서드로 최근 거래 내역을 조회합니다.
-        transactions = client.get_account_transactions(TRON_WALLET)
-        for blockchain_tx in transactions:
-            contract_info = blockchain_tx["raw_data"]["contract"][0]["parameter"]["value"]
-            data_hex = contract_info.get("data", "")
-            memo = bytes.fromhex(data_hex).decode("utf-8") if data_hex else ""
+        recent_txs = fetch_recent_transactions(TRON_WALLET, limit=30)
+        for tx_summary in recent_txs:
+            txid = tx_summary.get("txID", "")
+            if not txid:
+                continue
+            detail = fetch_transaction_detail(txid)
+            actual_amount, memo = parse_trc20_transfer_amount_and_memo(detail)
             if tx.transaction_id.lower() in memo.lower():
-                transferred_amount = int(contract_info.get("amount", 0))
-                actual_amount = transferred_amount / 1e6
-                # 금액이 부족하면 실패 처리 (초과 송금도 허용하나 아래에서 별도 처리)
-                if transferred_amount < int(float(tx.amount) * 1e6):
-                    return False, actual_amount
-                return True, actual_amount
+                if actual_amount >= float(tx.amount):
+                    return True, actual_amount
         return False, 0
     except Exception as e:
         logging.error(f"자동 송금 확인 오류: {e}")
         return False, 0
 
 async def auto_verify_deposits(context):
-    """
-    주기적으로 accepted 상태의 거래들에 대해 블록체인에서 입금 내역을 자동 확인합니다.
-    입금이 확인되면 구매자와 판매자에게 [자동 확인]이라는 봇 말투의 메시지를 전송하고,
-    거래 상태를 completed로 갱신합니다.
-    """
     session = get_db_session()
     try:
         pending_txs = session.query(Transaction).filter(Transaction.status == "accepted").all()
@@ -228,7 +235,7 @@ async def auto_verify_deposits(context):
                     net_amount = original_amount * (1 - NORMAL_COMMISSION_RATE)
                     msg_buyer = (
                         f"[자동 확인] 에스크로 봇: 거래 ID {tx.transaction_id}의 입금이 확인되었습니다.\n"
-                        f"정확한 금액 {original_amount} USDT 입금됨.\n거래가 완료되었습니다."
+                        f"정확한 금액 {original_amount} USDT가 입금됨.\n거래가 완료되었습니다."
                     )
                     msg_seller = (
                         f"[자동 확인] 에스크로 봇: 거래 ID {tx.transaction_id}의 입금이 확인되었습니다.\n"
@@ -247,23 +254,17 @@ async def auto_verify_deposits(context):
         session.close()
 
 # ==============================
-# 로깅 설정
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-
-# ==============================
 # 대화 상태 상수
-(
-    WAITING_FOR_ITEM_NAME,
-    WAITING_FOR_PRICE,
-    WAITING_FOR_ITEM_TYPE,
-    WAITING_FOR_CANCEL_ID,
-    WAITING_FOR_RATING,
-    WAITING_FOR_CONFIRMATION,
-    WAITING_FOR_REFUND_WALLET,
-) = range(7)
+(WAITING_FOR_ITEM_NAME,
+ WAITING_FOR_PRICE,
+ WAITING_FOR_ITEM_TYPE,
+ WAITING_FOR_CANCEL_ID,
+ WAITING_FOR_RATING,
+ WAITING_FOR_CONFIRMATION,
+ WAITING_FOR_REFUND_WALLET) = range(7)
 
 ITEMS_PER_PAGE = 10
-active_chats = {}  # {transaction_id: (buyer_id, seller_id)}
+active_chats = {}
 
 # ==============================
 # 명령어 안내
@@ -565,7 +566,7 @@ async def accept_transaction(update: Update, context) -> None:
             await update.message.reply_text("판매자만 이 명령어를 사용할 수 있습니다." + command_guide())
             return
 
-        tx.session_id = seller_wallet  # 판매자가 제공한 지갑 주소 저장
+        tx.session_id = seller_wallet
         tx.status = "accepted"
         session.commit()
 
@@ -617,8 +618,7 @@ async def refusal_transaction(update: Update, context) -> None:
         session.close()
 
 # ==============================
-# 8. /confirm (구매자 전용) – 송금 확인 및 오버/언더 센드 처리
-# 사용법: /confirm 거래ID 구매자지갑주소 txID
+# 8. /confirm (구매자 전용)
 async def confirm_payment(update: Update, context) -> None:
     args = update.message.text.split()
     if len(args) < 4:
@@ -651,7 +651,6 @@ async def confirm_payment(update: Update, context) -> None:
                 )
                 return
             else:
-                # 초과 송금: 오버센드로 7.5% 수수료 적용
                 net_amount = deposited_amount * (1 - OVERSEND_COMMISSION_RATE)
                 tx.status = "completed"
                 session.commit()
@@ -669,7 +668,6 @@ async def confirm_payment(update: Update, context) -> None:
                     logging.error(f"판매자 초과 송금 오류: {e}")
                 return
 
-        # 정상 입금: 정확한 금액
         tx.status = "completed"
         session.commit()
         net_amount = original_amount * (1 - NORMAL_COMMISSION_RATE)
@@ -729,7 +727,6 @@ async def save_rating(update: Update, context) -> int:
             await update.message.reply_text("유효한 거래가 아닙니다." + command_guide())
             return ConversationHandler.END
 
-        # 평가 대상: 구매자 → 판매자, 판매자 → 구매자
         target_id = tx.seller_id if update.message.from_user.id == tx.buyer_id else tx.buyer_id
         new_rating = Rating(user_id=target_id, score=score, review="익명")
         session.add(new_rating)
@@ -747,7 +744,7 @@ async def save_rating(update: Update, context) -> int:
         session.close()
 
 # ==============================
-# 10. /chat: 거래 당사자 간 익명 채팅 (텍스트 및 파일 전송 지원)
+# 10. /chat: 거래 당사자 간 익명 채팅
 async def start_chat(update: Update, context) -> None:
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -760,7 +757,6 @@ async def start_chat(update: Update, context) -> None:
         if not tx:
             await update.message.reply_text("유효한 거래가 아니거나 아직 수락되지 않은 거래입니다." + command_guide())
             return
-        # 당사자 확인
         user_id = update.message.from_user.id
         if user_id not in [tx.buyer_id, tx.seller_id]:
             await update.message.reply_text("이 거래의 당사자가 아니므로 채팅을 시작할 수 없습니다." + command_guide())
@@ -784,7 +780,6 @@ async def relay_message(update: Update, context) -> None:
     if not partner:
         return
     try:
-        # 파일 전송 (문서, 사진) 또는 텍스트 전송 모두 처리
         if update.message.document:
             file_id = update.message.document.file_id
             file_name = update.message.document.file_name
@@ -811,11 +806,9 @@ async def off_transaction(update: Update, context) -> None:
         if not tx:
             await update.message.reply_text("유효한 거래 ID가 아닙니다." + command_guide())
             return
-        # 거래가 이미 입금되어 완료/환불된 경우 취소 불가
         if tx.status not in ["pending", "accepted"]:
             await update.message.reply_text("이미 진행 중이거나 완료된 거래는 취소할 수 없습니다." + command_guide())
             return
-        # 당사자 확인
         if update.message.from_user.id not in [tx.buyer_id, tx.seller_id]:
             await update.message.reply_text("이 거래의 당사자가 아닙니다." + command_guide())
             return
@@ -834,7 +827,6 @@ async def off_transaction(update: Update, context) -> None:
 
 # ==============================
 # 12. /refund: 구매자 환불 요청 (구매자 전용)
-# 사용법: /refund 거래ID -> (후속: 구매자 지갑주소 입력)
 async def refund_request(update: Update, context) -> int:
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -857,7 +849,6 @@ async def refund_request(update: Update, context) -> int:
             await update.message.reply_text("입금 확인이 안 되었거나 거래 데이터에 이상이 있습니다." + command_guide())
             return ConversationHandler.END
 
-        # 환불 시, 중개 수수료 2.5%만 차감 (즉, 총 7.5% 수수료 적용시 구매자에게 돌려줄 금액)
         refund_amount = expected_amount * (1 - (NORMAL_COMMISSION_RATE / 2))
         context.user_data["refund_txid"] = t_id
         context.user_data["refund_amount"] = refund_amount
