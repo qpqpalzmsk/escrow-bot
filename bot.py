@@ -30,14 +30,12 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# 전역: 이미 사용된 txid 기록 (중복 사용 방지)
-USED_TXIDS = set()
-
-# 송금 시 네트워크 수수료 (예: 0.1 USDT; 실제 수수료에 맞게 조정)
-NETWORK_FEE = 0.1
+# 전역 변수
+USED_TXIDS = set()  # 이미 사용된 TXID 기록 (중복 사용 방지)
+NETWORK_FEE = 0.1   # 송금 시 네트워크 수수료 (USDT 단위)
 
 # -------------------------------------------------------------------
-# 환경 변수 설정 (예: Fly.io)
+# 환경 변수 설정
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")  # 예: "postgres://user:pass@host:5432/dbname"
 TRON_API = os.getenv("TRON_API")            # 예: "https://api.trongrid.io"
@@ -45,9 +43,7 @@ TRON_API_KEY = os.getenv("TRON_API_KEY")      # 실제 API Key
 TRON_WALLET = "TT8AZ3dCpgWJQSw9EXhhyR3uKj81jXxbRB"  # 봇의 Tron 지갑 주소 (TRC20 USDT 전용)
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "999999999"))
-
-# TRC20 USDT 컨트랙트 주소 (메인넷 – 실제 사용하는 주소)
-USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"  # TRC20 USDT 컨트랙트 주소
 
 # -------------------------------------------------------------------
 # requests 세션 설정
@@ -80,8 +76,8 @@ class Item(Base):
     name = Column(Text, nullable=False)
     price = Column(DECIMAL, nullable=False)
     seller_id = Column(BigInteger, nullable=False)
-    status = Column(String, default="available")  # available, sold 등
-    type = Column(String, nullable=False)           # 디지털 / 현물
+    status = Column(String, default="available")
+    type = Column(String, nullable=False)
     created_at = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
 
 class Transaction(Base):
@@ -90,10 +86,9 @@ class Transaction(Base):
     item_id = Column(Integer, nullable=False)
     buyer_id = Column(BigInteger, nullable=False)
     seller_id = Column(BigInteger, nullable=False)
-    # 거래 상태: pending -> accepted -> deposit_confirmed -> completed
     status = Column(String, default="pending")
-    session_id = Column(Text)  # 판매자가 /accept 시 입력한 지갑 주소 (출금 주소)
-    transaction_id = Column(Text, unique=True)  # 12자리 랜덤 거래 ID
+    session_id = Column(Text)
+    transaction_id = Column(Text, unique=True)
     amount = Column(DECIMAL, nullable=False)
     created_at = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
 
@@ -110,11 +105,11 @@ Base.metadata.create_all(bind=engine)
 # -------------------------------------------------------------------
 # Tronpy 설정
 client = Tron(provider=HTTPProvider(TRON_API, api_key=TRON_API_KEY))
-NORMAL_COMMISSION_RATE = 0.05      # 5%
-OVERSEND_COMMISSION_RATE = 0.075    # 7.5% (초과 송금 시)
+NORMAL_COMMISSION_RATE = 0.05   # 5%
+OVERSEND_COMMISSION_RATE = 0.075 # 7.5%
 
 # -------------------------------------------------------------------
-# 송금 및 검증 로직
+# 송금 및 검증 함수들
 def verify_deposit(expected_amount: float, txid: str, internal_txid: str) -> (bool, float):
     try:
         tx = client.get_transaction(txid)
@@ -317,7 +312,7 @@ def check_cancel(update: Update) -> bool:
 
 # -------------------------------------------------------------------
 # /start
-async def start(update: Update, _) -> int:
+async def start_command(update: Update, _) -> int:
     await update.message.reply_text(
         "에스크로 거래 봇에 오신 것을 환영합니다!\n문제 발생 시 관리자에게 문의하세요.\n(관리자 ID는 봇 프로필에서 확인)" + command_guide()
     )
@@ -685,7 +680,7 @@ async def check_deposit(update: Update, context: CallbackContext) -> None:
         context.bot.send_message(
             chat_id=tx.buyer_id,
             text=("입금이 확인되었습니다.\n판매자께서는 구매자에게 물품을 발송해 주세요.\n"
-                  "물품 발송 후 구매자께서는 /confirm 명령어를 입력하여 최종 거래를 완료해 주세요.")
+                  "물품 발송 후, 구매자께서는 /confirm 명령어를 입력하여 최종 거래를 완료해 주세요.")
         )
         context.bot.send_message(
             chat_id=tx.seller_id,
@@ -803,7 +798,7 @@ async def save_rating(update: Update, context: CallbackContext) -> int:
         session.close()
 
 # -------------------------------------------------------------------
-# /chat
+# /chat 대화 흐름
 active_chats = {}  # {거래ID: (buyer_id, seller_id)}
 
 async def start_chat(update: Update, context: CallbackContext) -> None:
@@ -856,7 +851,7 @@ async def relay_message(update: Update, context: CallbackContext) -> None:
         logging.error(f"채팅 메시지 전송 오류: {e}")
 
 # -------------------------------------------------------------------
-# /off
+# /off (거래 중단)
 async def off_transaction(update: Update, context: CallbackContext) -> None:
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -888,7 +883,7 @@ async def off_transaction(update: Update, context: CallbackContext) -> None:
         session.close()
 
 # -------------------------------------------------------------------
-# /refund (구매자 전용, 오버송금된 경우)
+# /refund (구매자 전용; 오버송금된 경우)
 async def refund_request(update: Update, context: CallbackContext) -> int:
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -976,40 +971,57 @@ async def exit_to_start_command(update: Update, context: CallbackContext) -> int
     return await exit_to_start(update, context)
 
 # -------------------------------------------------------------------
-# 대화형 핸들러 설정
-sell_handler = ConversationHandler(
-    entry_points=[CommandHandler("sell", sell_command)],
-    states={
-        WAITING_FOR_ITEM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_name)],
-        WAITING_FOR_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_price)],
-        WAITING_FOR_ITEM_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_type)],
-    },
-    fallbacks=[CommandHandler("exit", exit_to_start_command)],
-)
+# /chat 대화 흐름
+active_chats = {}  # {거래ID: (buyer_id, seller_id)}
 
-cancel_handler = ConversationHandler(
-    entry_points=[CommandHandler("cancel", cancel)],
-    states={
-        WAITING_FOR_CANCEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, cancel_item)],
-    },
-    fallbacks=[CommandHandler("exit", exit_to_start_command)],
-)
+async def start_chat(update: Update, context: CallbackContext) -> None:
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("사용법: /chat 거래ID\n예: /chat 123456789012" + command_guide())
+        return
+    t_id = args[1].strip()
+    session = get_db_session()
+    try:
+        tx = session.query(Transaction).filter_by(transaction_id=t_id).filter(
+            Transaction.status.in_(["accepted", "deposit_confirmed", "deposit_confirmed_over", "completed"])
+        ).first()
+        if not tx:
+            await update.message.reply_text("유효한 거래가 아니거나 아직 입금 확인되지 않은 거래입니다." + command_guide())
+            return
+        user_id = update.message.from_user.id
+        if user_id not in [tx.buyer_id, tx.seller_id]:
+            await update.message.reply_text("이 거래의 당사자가 아니므로 채팅을 시작할 수 없습니다." + command_guide())
+            return
+        active_chats[t_id] = (tx.buyer_id, tx.seller_id)
+        context.user_data["current_chat_tx"] = t_id
+        await update.message.reply_text("채팅을 시작합니다. 텍스트/파일(사진, 문서) 전송 시 상대방에게 전달됩니다." + command_guide())
+    except Exception as e:
+        logging.error(f"/chat 오류: {e}")
+        await update.message.reply_text("채팅 시작 중 오류가 발생했습니다." + command_guide())
+    finally:
+        session.close()
 
-rate_handler = ConversationHandler(
-    entry_points=[CommandHandler("rate", rate_user)],
-    states={
-        WAITING_FOR_CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_rating)],
-    },
-    fallbacks=[CommandHandler("exit", exit_to_start_command)],
-)
-
-refund_handler = ConversationHandler(
-    entry_points=[CommandHandler("refund", refund_request)],
-    states={
-        WAITING_FOR_REFUND_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_refund)],
-    },
-    fallbacks=[CommandHandler("exit", exit_to_start_command)],
-)
+async def relay_message(update: Update, context: CallbackContext) -> None:
+    t_id = context.user_data.get("current_chat_tx")
+    if not t_id or t_id not in active_chats:
+        return
+    buyer_id, seller_id = active_chats[t_id]
+    sender = update.message.from_user.id
+    partner = seller_id if sender == buyer_id else buyer_id if sender == seller_id else None
+    if not partner:
+        return
+    try:
+        if update.message.document:
+            file_id = update.message.document.file_id
+            file_name = update.message.document.file_name
+            await context.bot.send_document(chat_id=partner, document=file_id, caption=f"[파일] {file_name}")
+        elif update.message.photo:
+            photo = update.message.photo[-1]
+            await context.bot.send_photo(chat_id=partner, photo=photo.file_id, caption="[사진]")
+        else:
+            await context.bot.send_message(chat_id=partner, text=f"[채팅] {update.message.text}")
+    except Exception as e:
+        logging.error(f"채팅 메시지 전송 오류: {e}")
 
 # -------------------------------------------------------------------
 # 메인 실행부
@@ -1017,7 +1029,7 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_API_KEY).build()
 
     # 주요 명령어 등록
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("list", list_items_command))
     app.add_handler(CommandHandler("next", next_page))
     app.add_handler(CommandHandler("prev", prev_page))
