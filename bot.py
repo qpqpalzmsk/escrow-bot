@@ -17,15 +17,18 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from sqlalchemy import create_engine, Column, Integer, DECIMAL, BigInteger, Text, TIMESTAMP, text
-from sqlalchemy.ext.declarative import declarative_base  # SQLAlchemy 2.0에서는 sqlalchemy.orm.declarative_base() 권장
+# SQLAlchemy 임포트 (String 포함)
+from sqlalchemy import create_engine, Column, Integer, String, DECIMAL, BigInteger, Text, TIMESTAMP, text
+from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
 
 from tronpy import Tron
 from tronpy.providers import HTTPProvider
 
-# --------------------------------------------------
-# 환경 변수 및 기본 설정
+# 로깅 설정
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+
+# 환경 변수 설정 (Fly.io 시크릿 등)
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")  # 예: "postgres://user:pass@host:5432/dbname"
 TRON_API = os.getenv("TRON_API")            # 예: "https://api.trongrid.io"
@@ -35,24 +38,17 @@ PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 TRON_PASSWORD = os.getenv("TRON_PASSWORD")
 if not TRON_PASSWORD:
     logging.error("TRON_PASSWORD 환경변수가 설정되어 있지 않습니다. 반드시 설정하세요.")
-USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"  # 메인넷 USDT 컨트랙트 주소
+USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "999999999"))
 
-NORMAL_COMMISSION_RATE = 0.05   # 기본 5%
-OVERSEND_COMMISSION_RATE = 0.075  # 초과 송금 시 총 7.5%
-
-ITEMS_PER_PAGE = 10
-
-# --------------------------------------------------
-# requests 세션 (재시도/타임아웃)
+# requests 세션 설정 (재시도/타임아웃)
 http_session = requests.Session()
 retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
 http_adapter = HTTPAdapter(max_retries=retries)
 http_session.mount("https://", http_adapter)
 http_session.mount("http://", http_adapter)
 
-# --------------------------------------------------
-# SQLAlchemy 설정 (pool_pre_ping 추가)
+# SQLAlchemy 설정 (pool_pre_ping 옵션 추가)
 engine = create_engine(
     DATABASE_URL,
     echo=True,
@@ -66,7 +62,6 @@ Base = declarative_base()
 def get_db_session():
     return SessionLocal()
 
-# --------------------------------------------------
 # 데이터베이스 모델
 class Item(Base):
     __tablename__ = 'items'
@@ -100,12 +95,14 @@ class Rating(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# --------------------------------------------------
-# Tron 클라이언트 설정
+# Tron 클라이언트 설정 (TRON_API의 끝에 '/' 제거)
 TRON_API_CLEAN = TRON_API.rstrip("/")
 client = Tron(provider=HTTPProvider(TRON_API_CLEAN, api_key=TRON_API_KEY))
 
-# --------------------------------------------------
+# 중개 수수료
+NORMAL_COMMISSION_RATE = 0.05   # 5%
+OVERSEND_COMMISSION_RATE = 0.075  # 7.5% (초과 송금 시)
+
 # TronGrid API 유틸리티 함수
 def fetch_recent_transactions(address: str, limit: int = 30) -> list:
     url = f"{TRON_API_CLEAN}/v1/accounts/{address}/transactions"
@@ -141,10 +138,9 @@ def parse_trc20_transfer_amount_and_memo(tx_detail: dict) -> (float, str):
         actual_amount = transferred_amount / 1e6
         return actual_amount, memo
     except Exception as e:
-        logging.error(f"트랜잭션 파싱 오류: {e}")
+        logging.error(f"Transaction parsing error: {e}")
         return 0, ""
 
-# --------------------------------------------------
 # 송금 및 검증 로직
 def verify_deposit(expected_amount: float, txid: str, internal_txid: str) -> (bool, float):
     try:
@@ -156,7 +152,7 @@ def verify_deposit(expected_amount: float, txid: str, internal_txid: str) -> (bo
             return (False, actual_amount)
         return (True, actual_amount)
     except Exception as e:
-        logging.error(f"블록체인 거래 검증 오류: {e}")
+        logging.error(f"Blockchain verification error: {e}")
         return (False, 0)
 
 def check_usdt_payment(expected_amount: float, txid: str = "", internal_txid: str = "") -> (bool, float):
@@ -167,12 +163,12 @@ def check_usdt_payment(expected_amount: float, txid: str = "", internal_txid: st
         balance = contract.functions.balanceOf(TRON_WALLET)
         return (balance / 1e6) >= expected_amount, balance / 1e6
     except Exception as e:
-        logging.error(f"USDT 잔액 확인 오류: {e}")
+        logging.error(f"USDT balance check error: {e}")
         return (False, 0)
 
 def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
     if not TRON_PASSWORD:
-        raise Exception("TRON_PASSWORD 환경변수가 설정되어 있지 않습니다.")
+        raise Exception("TRON_PASSWORD not set.")
     try:
         contract = client.get_contract(USDT_CONTRACT)
         data = memo.encode("utf-8").hex() if memo else ""
@@ -188,11 +184,10 @@ def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
         result = txn.wait()
         return result
     except Exception as e:
-        logging.error(f"TRC20 송금 오류: {e}")
+        logging.error(f"TRC20 transfer error: {e}")
         raise
 
-# --------------------------------------------------
-# 자동 송금 확인 (정기 작업)
+# 자동 송금 확인 (TronGrid 기반)
 def auto_verify_transaction(tx: Transaction) -> (bool, float):
     try:
         recent_txs = fetch_recent_transactions(TRON_WALLET, limit=30)
@@ -207,7 +202,7 @@ def auto_verify_transaction(tx: Transaction) -> (bool, float):
                     return True, actual_amount
         return False, 0
     except Exception as e:
-        logging.error(f"자동 송금 확인 오류: {e}")
+        logging.error(f"Auto verification error: {e}")
         return False, 0
 
 async def auto_verify_deposits(context):
@@ -220,29 +215,33 @@ async def auto_verify_deposits(context):
                 original_amount = float(tx.amount)
                 if deposited_amount > original_amount:
                     net_amount = deposited_amount * (1 - OVERSEND_COMMISSION_RATE)
-                    msg_buyer = (f"[자동 확인] 거래 ID {tx.transaction_id} 입금 확인됨.\n"
-                                 f"입금액: {deposited_amount} USDT (초과 송금)\n판매자님, {net_amount} USDT 송금 후 물품 발송 바랍니다.")
-                    msg_seller = (f"[자동 확인] 거래 ID {tx.transaction_id} 입금 확인됨.\n"
-                                  f"초과 송금(7.5% 수수료 적용) 후 {net_amount} USDT가 판매자 지갑으로 송금됨.\n물품 발송 바랍니다.")
+                    msg_buyer = (f"[Auto] Transaction {tx.transaction_id} deposit confirmed.\n"
+                                 f"Deposited: {deposited_amount} USDT (over-sent)\nSeller, please ship goods after receiving {net_amount} USDT.")
+                    msg_seller = (f"[Auto] Transaction {tx.transaction_id} deposit confirmed.\n"
+                                  f"After 7.5% fee, {net_amount} USDT will be sent to your wallet.\nPlease ship the product.")
+                    tx.status = "completed"
+                    session.commit()
+                    try:
+                        await context.bot.send_message(chat_id=tx.buyer_id, text=msg_buyer)
+                        await context.bot.send_message(chat_id=tx.seller_id, text=msg_seller)
+                    except Exception as e:
+                        logging.error(f"Auto verification notification error: {e}")
                 else:
                     net_amount = original_amount * (1 - NORMAL_COMMISSION_RATE)
-                    msg_buyer = (f"[자동 확인] 거래 ID {tx.transaction_id} 입금 확인됨.\n"
-                                 f"정확한 금액 {original_amount} USDT 입금.\n거래 완료됨.")
-                    msg_seller = (f"[자동 확인] 거래 ID {tx.transaction_id} 입금 확인됨.\n"
-                                  f"판매자 지갑으로 {net_amount} USDT 송금됨.\n물품 발송 바랍니다.")
-                tx.status = "completed"
-                session.commit()
-                try:
-                    await context.bot.send_message(chat_id=tx.buyer_id, text=msg_buyer)
-                    await context.bot.send_message(chat_id=tx.seller_id, text=msg_seller)
-                except Exception as e:
-                    logging.error(f"자동 확인 알림 전송 오류: {e}")
+                    msg_buyer = (f"[Auto] Transaction {tx.transaction_id} deposit confirmed.\nExact deposit: {original_amount} USDT received.\nTransaction completed.")
+                    msg_seller = (f"[Auto] Transaction {tx.transaction_id} deposit confirmed.\n{net_amount} USDT will be sent to your wallet.\nPlease ship the product.")
+                    tx.status = "completed"
+                    session.commit()
+                    try:
+                        await context.bot.send_message(chat_id=tx.buyer_id, text=msg_buyer)
+                        await context.bot.send_message(chat_id=tx.seller_id, text=msg_seller)
+                    except Exception as e:
+                        logging.error(f"Auto verification notification error: {e}")
     except Exception as e:
-        logging.error(f"자동 확인 작업 오류: {e}")
+        logging.error(f"Auto verification job error: {e}")
     finally:
         session.close()
 
-# --------------------------------------------------
 # 대화 상태 상수
 (WAITING_FOR_ITEM_NAME,
  WAITING_FOR_PRICE,
@@ -252,40 +251,38 @@ async def auto_verify_deposits(context):
  WAITING_FOR_CONFIRMATION,
  WAITING_FOR_REFUND_WALLET) = range(7)
 
+ITEMS_PER_PAGE = 10
 active_chats = {}
 
-# --------------------------------------------------
-# 명령어 안내 (메인 메뉴)
 def command_guide() -> str:
     return (
-        "\n\n[메인 메뉴]\n"
-        "버튼을 이용하여 기능을 선택하세요. (/menu 로 메인 메뉴를 불러올 수 있습니다.)\n"
-        "※ 기존 명령어도 사용 가능합니다."
+        "\n\n[Main Menu]\n"
+        "Use the buttons below to select a function.\n"
+        "Type /menu to return to the main menu.\n"
+        "\n※ Traditional command functions are also supported."
     )
 
 def reset_conversation(context):
     context.user_data.clear()
 
-# --------------------------------------------------
-# 버튼 기반 메인 메뉴 관련 함수
 def get_main_menu_keyboard():
     keyboard = [
-        [InlineKeyboardButton("판매 등록", callback_data="menu_sell"),
-         InlineKeyboardButton("상품 목록", callback_data="menu_list")],
-        [InlineKeyboardButton("상품 검색", callback_data="menu_search"),
-         InlineKeyboardButton("거래 요청", callback_data="menu_offer")],
-        [InlineKeyboardButton("거래 관리", callback_data="menu_manage"),
-         InlineKeyboardButton("채팅", callback_data="menu_chat")],
-        [InlineKeyboardButton("기타 관리", callback_data="menu_admin"),
-         InlineKeyboardButton("종료", callback_data="menu_exit")]
+        [InlineKeyboardButton("Sell", callback_data="menu_sell"),
+         InlineKeyboardButton("List Items", callback_data="menu_list")],
+        [InlineKeyboardButton("Search", callback_data="menu_search"),
+         InlineKeyboardButton("Offer", callback_data="menu_offer")],
+        [InlineKeyboardButton("Manage", callback_data="menu_manage"),
+         InlineKeyboardButton("Chat", callback_data="menu_chat")],
+        [InlineKeyboardButton("Admin", callback_data="menu_admin"),
+         InlineKeyboardButton("Exit", callback_data="menu_exit")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 async def show_main_menu(update: Update, context) -> None:
     if update.message:
-        await update.message.reply_text("메인 메뉴를 선택하세요.", reply_markup=get_main_menu_keyboard())
+        await update.message.reply_text("Select an option from the main menu.", reply_markup=get_main_menu_keyboard())
     elif update.callback_query:
-        await update.callback_query.edit_message_text("메인 메뉴를 선택하세요.", reply_markup=get_main_menu_keyboard())
+        await update.callback_query.edit_message_text("Select an option from the main menu.", reply_markup=get_main_menu_keyboard())
 
 async def main_menu_callback(update: Update, context) -> None:
     query = update.callback_query
@@ -293,80 +290,82 @@ async def main_menu_callback(update: Update, context) -> None:
     data = query.data
     reset_conversation(context)
     if data == "menu_sell":
-        await query.edit_message_text("판매 등록을 선택하셨습니다.\n상품 이름을 입력해주세요.")
+        await query.edit_message_text("Sell selected. Please enter the product name.")
         context.user_data["next_func"] = sell_step_2
     elif data == "menu_list":
         await list_items_command(update, context)
     elif data == "menu_search":
-        await query.edit_message_text("검색어를 입력해주세요.")
+        await query.edit_message_text("Enter a search term.")
         context.user_data["next_func"] = list_search_results
     elif data == "menu_offer":
-        await query.edit_message_text("거래 요청할 상품의 번호 또는 이름을 입력해주세요.")
+        await query.edit_message_text("Enter the product number or name for the offer.")
         context.user_data["next_func"] = offer_item
     elif data == "menu_manage":
         keyboard = [
-            [InlineKeyboardButton("수락", callback_data="manage_accept"),
-             InlineKeyboardButton("거절", callback_data="manage_refusal")],
-            [InlineKeyboardButton("거래 완료 확인", callback_data="manage_confirm"),
-             InlineKeyboardButton("환불", callback_data="manage_refund")],
-            [InlineKeyboardButton("평점 남기기", callback_data="manage_rate"),
-             InlineKeyboardButton("거래 중단", callback_data="manage_off")]
+            [InlineKeyboardButton("Accept", callback_data="manage_accept"),
+             InlineKeyboardButton("Refuse", callback_data="manage_refusal")],
+            [InlineKeyboardButton("Confirm", callback_data="manage_confirm"),
+             InlineKeyboardButton("Refund", callback_data="manage_refund")],
+            [InlineKeyboardButton("Rate", callback_data="manage_rate"),
+             InlineKeyboardButton("Cancel", callback_data="manage_off")]
         ]
-        await query.edit_message_text("거래 관리를 선택하세요.", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("Select a management function.", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data == "menu_chat":
-        await query.edit_message_text("채팅할 거래의 거래 ID를 입력해주세요.")
+        await query.edit_message_text("Enter the transaction ID for chat.")
         context.user_data["next_func"] = start_chat
     elif data == "menu_admin":
-        keyboard = [[InlineKeyboardButton("강제 종료", callback_data="admin_warexit")]]
-        await query.edit_message_text("관리자 기능을 선택하세요.", reply_markup=InlineKeyboardMarkup(keyboard))
+        keyboard = [
+            [InlineKeyboardButton("Force Exit", callback_data="admin_warexit")]
+        ]
+        await query.edit_message_text("Select an admin function.", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data == "menu_exit":
-        await query.edit_message_text("종료합니다. 다음에 또 뵙겠습니다!")
+        await query.edit_message_text("Exiting. Goodbye!")
     elif data == "manage_accept":
-        await query.edit_message_text("거래 수락을 선택하셨습니다.\n거래 ID와 판매자 지갑주소를 공백으로 구분하여 입력해주세요.")
+        await query.edit_message_text("Accept selected.\nEnter transaction ID and seller wallet address (space separated).")
         context.user_data["next_func"] = accept_transaction
     elif data == "manage_refusal":
-        await query.edit_message_text("거래 거절을 선택하셨습니다.\n거래 ID를 입력해주세요.")
+        await query.edit_message_text("Refusal selected.\nEnter transaction ID.")
         context.user_data["next_func"] = refusal_transaction
     elif data == "manage_confirm":
-        await query.edit_message_text("거래 완료 확인을 선택하셨습니다.\n거래 ID, 구매자 지갑주소, txID를 공백으로 구분하여 입력해주세요.")
+        await query.edit_message_text("Confirm selected.\nEnter transaction ID, buyer wallet address, and txID (space separated).")
         context.user_data["next_func"] = confirm_payment
     elif data == "manage_refund":
-        await query.edit_message_text("환불 요청을 선택하셨습니다.\n거래 ID를 입력해주세요.")
+        await query.edit_message_text("Refund selected.\nEnter transaction ID.")
         context.user_data["next_func"] = refund_request
     elif data == "manage_rate":
-        await query.edit_message_text("평점 남기기를 선택하셨습니다.\n거래 ID를 입력해주세요.")
+        await query.edit_message_text("Rate selected.\nEnter transaction ID.")
         context.user_data["next_func"] = rate_user
     elif data == "manage_off":
-        await query.edit_message_text("거래 중단을 선택하셨습니다.\n거래 ID를 입력해주세요.")
+        await query.edit_message_text("Cancel selected.\nEnter transaction ID.")
         context.user_data["next_func"] = off_transaction
     elif data == "admin_warexit":
-        await query.edit_message_text("강제 종료를 선택하셨습니다.\n거래 ID를 입력해주세요.")
+        await query.edit_message_text("Force exit selected.\nEnter transaction ID.")
         context.user_data["next_func"] = warexit_command
 
-# --------------------------------------------------
-# /sell 대화 흐름 (버튼 인터페이스)
+# /sell 대화 흐름 (버튼 인터페이스용)
 async def sell_step_2(update: Update, context) -> int:
     context.user_data["sell_name"] = update.message.text.strip()
-    await update.message.reply_text("상품의 가격(USDT)을 입력해주세요.")
+    await update.message.reply_text("Enter product price (USDT).")
     return "sell_price"
 
 async def sell_step_3(update: Update, context) -> int:
     try:
         context.user_data["sell_price"] = float(update.message.text.strip())
         keyboard = [
-            [InlineKeyboardButton("디지털", callback_data="sell_type_digital"),
-             InlineKeyboardButton("현물", callback_data="sell_type_physical")]
+            [InlineKeyboardButton("Digital", callback_data="sell_type_digital"),
+             InlineKeyboardButton("Physical", callback_data="sell_type_physical")]
         ]
-        await update.message.reply_text("상품 유형을 선택해주세요.", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("Select product type.", reply_markup=InlineKeyboardMarkup(keyboard))
     except ValueError:
-        await update.message.reply_text("올바른 가격을 입력해주세요.")
+        await update.message.reply_text("Enter a valid price.")
         return "sell_price"
     return "sell_type"
 
 async def sell_finish(update: Update, context) -> None:
     query = update.callback_query
-    item_type = "디지털" if query.data == "sell_type_digital" else "현물"
+    item_type = "Digital" if query.data == "sell_type_digital" else "Physical"
     context.user_data["sell_type"] = item_type
+
     session = get_db_session()
     new_item = Item(
         name=context.user_data["sell_name"],
@@ -377,30 +376,29 @@ async def sell_finish(update: Update, context) -> None:
     session.add(new_item)
     session.commit()
     session.close()
+
     await query.answer()
     await query.edit_message_text(
-        f"상품이 등록되었습니다.\n상품명: {context.user_data['sell_name']}\n가격: {context.user_data['sell_price']} USDT\n유형: {item_type}"
+        f"Product registered.\nName: {context.user_data['sell_name']}\nPrice: {context.user_data['sell_price']} USDT\nType: {item_type}"
     )
-    await query.message.reply_text("메인 메뉴로 돌아갑니다.", reply_markup=get_main_menu_keyboard())
+    await query.message.reply_text("Returning to main menu.", reply_markup=get_main_menu_keyboard())
 
-# --------------------------------------------------
-# 텍스트 입력 처리 (버튼 메뉴 후 필요한 입력)
+# 텍스트 입력 처리 (버튼 메뉴 후 입력)
 async def text_input_handler(update: Update, context) -> None:
     if "next_func" in context.user_data:
         next_func = context.user_data["next_func"]
         await next_func(update, context)
     else:
-        await update.message.reply_text("입력이 처리되지 않았습니다. /menu를 눌러 메뉴로 돌아가세요.", reply_markup=get_main_menu_keyboard())
+        await update.message.reply_text("Input not processed. Type /menu to return to the main menu.", reply_markup=get_main_menu_keyboard())
 
-# --------------------------------------------------
-# 기존 명령어 기반 흐름 함수들 (버튼 메뉴와 함께 사용)
+# /list, /next, /prev (기존 명령어)
 async def list_items_command(update: Update, context) -> None:
     session = get_db_session()
     try:
         page = context.user_data.get("list_page", 1)
         items = session.query(Item).filter(Item.status == "available").all()
         if not items:
-            await update.message.reply_text("등록된 상품이 없습니다." + command_guide())
+            await update.message.reply_text("No items available." + command_guide())
             return
         total_pages = (len(items) - 1) // ITEMS_PER_PAGE + 1
         page = total_pages if page < 1 else (1 if page > total_pages else page)
@@ -409,14 +407,14 @@ async def list_items_command(update: Update, context) -> None:
         end = start + ITEMS_PER_PAGE
         page_items = items[start:end]
         context.user_data["list_mapping"] = {str(idx): item.id for idx, item in enumerate(page_items, start=1)}
-        msg = f"구매 가능한 상품 목록 (페이지 {page}/{total_pages}):\n"
+        msg = f"Available items (Page {page}/{total_pages}):\n"
         for idx, item in enumerate(page_items, start=1):
             msg += f"{idx}. {item.name} - {item.price} USDT ({item.type})\n"
-        msg += "\n/next, /prev 로 페이지 이동\n/offer [번호 또는 이름] 으로 거래 요청"
+        msg += "\nUse /next, /prev to navigate.\nUse /offer [number or name] to request a transaction."
         await update.message.reply_text(msg + command_guide())
     except Exception as e:
-        logging.error(f"/list 오류: {e}")
-        await update.message.reply_text("상품 목록 조회 중 오류가 발생했습니다." + command_guide())
+        logging.error(f"/list error: {e}")
+        await update.message.reply_text("Error fetching items." + command_guide())
     finally:
         session.close()
 
@@ -428,11 +426,12 @@ async def prev_page(update: Update, context) -> None:
     context.user_data["list_page"] = context.user_data.get("list_page", 1) - 1
     await list_items_command(update, context)
 
+# /search
 async def search_items_command(update: Update, context) -> None:
     reset_conversation(context)
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
-        await update.message.reply_text("검색어를 입력해주세요. 예: /search 마우스" + command_guide())
+        await update.message.reply_text("Enter a search term. E.g., /search Mouse" + command_guide())
         return
     query = args[1].strip().lower()
     context.user_data["search_query"] = query
@@ -446,7 +445,7 @@ async def list_search_results(update: Update, context) -> None:
         page = context.user_data.get("search_page", 1)
         items = session.query(Item).filter(Item.name.ilike(f"%{query}%"), Item.status == "available").all()
         if not items:
-            await update.message.reply_text(f"'{query}' 검색 결과가 없습니다." + command_guide())
+            await update.message.reply_text(f"No items found for '{query}'." + command_guide())
             return
         total_pages = (len(items) - 1) // ITEMS_PER_PAGE + 1
         page = total_pages if page < 1 else (1 if page > total_pages else page)
@@ -455,16 +454,20 @@ async def list_search_results(update: Update, context) -> None:
         end = start + ITEMS_PER_PAGE
         page_items = items[start:end]
         context.user_data["search_mapping"] = {str(idx): item.id for idx, item in enumerate(page_items, start=1)}
-        msg = f"'{query}' 검색 결과 (페이지 {page}/{total_pages}):\n"
+        msg = f"Search results for '{query}' (Page {page}/{total_pages}):\n"
         for idx, item in enumerate(page_items, start=1):
             msg += f"{idx}. {item.name} - {item.price} USDT ({item.type})\n"
-        msg += "\n/next, /prev 로 페이지 이동\n/offer [번호 또는 이름] 으로 거래 요청"
+        msg += "\nUse /next, /prev to navigate.\nUse /offer [number or name] to request a transaction."
         await update.message.reply_text(msg + command_guide())
     except Exception as e:
-        logging.error(f"/search 오류: {e}")
-        await update.message.reply_text("상품 검색 중 오류가 발생했습니다." + command_guide())
+        logging.error(f"/search error: {e}")
+        await update.message.reply_text("Error during search." + command_guide())
     finally:
         session.close()
+
+# /offer
+def generate_transaction_id() -> str:
+    return ''.join(str(random.randint(0, 9)) for _ in range(12))
 
 async def offer_item(update: Update, context) -> None:
     reset_conversation(context)
@@ -472,7 +475,7 @@ async def offer_item(update: Update, context) -> None:
     try:
         args = update.message.text.split(maxsplit=1)
         if len(args) < 2:
-            await update.message.reply_text("사용법: /offer [번호 또는 상품이름]" + command_guide())
+            await update.message.reply_text("Usage: /offer [number or product name]" + command_guide())
             return
         identifier = args[1].strip()
         mapping = context.user_data.get("list_mapping") or context.user_data.get("search_mapping") or {}
@@ -491,37 +494,33 @@ async def offer_item(update: Update, context) -> None:
                     Item.status == "available"
                 ).first()
         if not item:
-            await update.message.reply_text("유효한 상품 번호/이름을 입력해주세요." + command_guide())
+            await update.message.reply_text("Invalid product number/name." + command_guide())
             return
         buyer_id = update.message.from_user.id
         seller_id = item.seller_id
-        t_id = ''.join(str(random.randint(0, 9)) for _ in range(12))
+        t_id = generate_transaction_id()
         new_tx = Transaction(item_id=item.id, buyer_id=buyer_id, seller_id=seller_id,
                              amount=item.price, transaction_id=t_id)
         session.add(new_tx)
         session.commit()
-        await update.message.reply_text(
-            f"'{item.name}' 거래 요청이 생성되었습니다.\n거래 ID: {t_id}\n반드시 송금 시 메모(거래ID)를 입력해주세요!" + command_guide()
-        )
+        await update.message.reply_text(f"Transaction for '{item.name}' created.\nTransaction ID: {t_id}\nInclude this ID in your transfer memo!" + command_guide())
         try:
             await context.bot.send_message(
                 chat_id=seller_id,
-                text=(f"당신의 상품 '{item.name}'에 거래 요청이 도착했습니다.\n거래 ID: {t_id}\n"
-                      "판매자님, /accept 거래ID 판매자지갑주소 로 수락하거나, /refusal 거래ID 로 거절해주세요.\n"
-                      "※ 네트워크: TRC20 USDT")
+                text=(f"Transaction request for your product '{item.name}' has arrived.\nTransaction ID: {t_id}\n"
+                      "Seller, accept with /accept [transactionID] [your wallet address] or refuse with /refusal [transactionID].\n"
+                      "Network: TRC20 USDT")
             )
         except Exception as e:
-            logging.error(f"판매자 알림 오류: {e}")
+            logging.error(f"Seller notification error: {e}")
     except Exception as e:
         session.rollback()
-        logging.error(f"/offer 오류: {e}")
-        await update.message.reply_text("거래 요청 중 오류가 발생했습니다." + command_guide())
+        logging.error(f"/offer error: {e}")
+        await update.message.reply_text("Error creating transaction." + command_guide())
     finally:
         session.close()
 
-# --------------------------------------------------
-# /cancel, /accept, /refusal, /confirm, /rate, /chat, /off, /refund, /warexit, /exit 등
-
+# /cancel
 async def cancel(update: Update, context) -> int:
     reset_conversation(context)
     session = get_db_session()
@@ -529,7 +528,7 @@ async def cancel(update: Update, context) -> int:
         seller_id = update.message.from_user.id
         items = session.query(Item).filter(Item.seller_id == seller_id, Item.status == "available").all()
         if not items:
-            await update.message.reply_text("취소할 수 있는 상품이 없습니다. (입금 전 상품만 가능)" + command_guide())
+            await update.message.reply_text("No cancellable items available (only items not yet funded)." + command_guide())
             return ConversationHandler.END
         page = context.user_data.get("cancel_page", 1)
         total_pages = (len(items) - 1) // ITEMS_PER_PAGE + 1
@@ -539,15 +538,15 @@ async def cancel(update: Update, context) -> int:
         end = start + ITEMS_PER_PAGE
         page_items = items[start:end]
         context.user_data["cancel_mapping"] = {str(idx): item.id for idx, item in enumerate(page_items, start=1)}
-        msg = f"취소 가능한 상품 목록 (페이지 {page}/{total_pages}):\n"
+        msg = f"Cancellable items (Page {page}/{total_pages}):\n"
         for idx, it in enumerate(page_items, start=1):
             msg += f"{idx}. {it.name} - {it.price} USDT ({it.type})\n"
-        msg += "\n/next, /prev 로 페이지 이동\n취소할 상품 번호/이름을 입력해주세요."
+        msg += "\nUse /next, /prev to navigate.\nEnter the number or name to cancel the item."
         await update.message.reply_text(msg + command_guide())
         return WAITING_FOR_CANCEL_ID
     except Exception as e:
-        logging.error(f"/cancel 오류: {e}")
-        await update.message.reply_text("상품 취소 목록 조회 중 오류가 발생했습니다." + command_guide())
+        logging.error(f"/cancel error: {e}")
+        await update.message.reply_text("Error fetching cancellable items." + command_guide())
         return ConversationHandler.END
     finally:
         session.close()
@@ -565,31 +564,28 @@ async def cancel_item(update: Update, context) -> int:
             try:
                 item = session.query(Item).filter_by(id=int(identifier), seller_id=seller_id, status="available").first()
             except ValueError:
-                item = session.query(Item).filter(
-                    Item.name.ilike(f"%{identifier}%"),
-                    Item.seller_id == seller_id,
-                    Item.status == "available"
-                ).first()
+                item = session.query(Item).filter(Item.name.ilike(f"%{identifier}%"), Item.seller_id == seller_id, Item.status == "available").first()
         if not item:
-            await update.message.reply_text("유효한 상품 번호/이름이 없거나 취소 불가능한 상태입니다." + command_guide())
+            await update.message.reply_text("Invalid or non-cancellable item." + command_guide())
             return WAITING_FOR_CANCEL_ID
         session.delete(item)
         session.commit()
-        await update.message.reply_text(f"'{item.name}' 상품이 취소되었습니다." + command_guide())
+        await update.message.reply_text(f"'{item.name}' has been cancelled." + command_guide())
         return ConversationHandler.END
     except Exception as e:
         session.rollback()
-        logging.error(f"/cancel 처리 오류: {e}")
-        await update.message.reply_text("상품 취소 처리 중 오류가 발생했습니다." + command_guide())
+        logging.error(f"/cancel processing error: {e}")
+        await update.message.reply_text("Error cancelling item." + command_guide())
         return WAITING_FOR_CANCEL_ID
     finally:
         session.close()
 
+# /accept
 async def accept_transaction(update: Update, context) -> None:
     reset_conversation(context)
     args = update.message.text.split()
     if len(args) < 3:
-        await update.message.reply_text("사용법: /accept 거래ID 판매자지갑주소\n예: /accept 123456789012 TXXXXXX..." + command_guide())
+        await update.message.reply_text("Usage: /accept [transactionID] [sellerWalletAddress]" + command_guide())
         return
     t_id = args[1].strip()
     seller_wallet = args[2].strip()
@@ -597,63 +593,64 @@ async def accept_transaction(update: Update, context) -> None:
     try:
         tx = session.query(Transaction).filter_by(transaction_id=t_id, status="pending").first()
         if not tx:
-            await update.message.reply_text("유효한 거래 ID가 아닙니다." + command_guide())
+            await update.message.reply_text("Invalid transaction ID." + command_guide())
             return
         if update.message.from_user.id != tx.seller_id:
-            await update.message.reply_text("판매자만 이 명령어를 사용할 수 있습니다." + command_guide())
+            await update.message.reply_text("Only the seller can accept this transaction." + command_guide())
             return
         tx.session_id = seller_wallet
         tx.status = "accepted"
         session.commit()
-        await update.message.reply_text(f"거래 ID {t_id}가 수락되었습니다. (네트워크: TRC20 USDT)\n구매자에게 송금 안내를 전송합니다." + command_guide())
+        await update.message.reply_text(f"Transaction {t_id} accepted.\nNetwork: TRC20 USDT\nNotifying buyer..." + command_guide())
         try:
             await context.bot.send_message(
                 chat_id=tx.buyer_id,
-                text=(f"거래 ID {t_id}가 수락되었습니다.\n"
-                      f"해당 금액({tx.amount} USDT)를 {TRON_WALLET}로 송금해주세요.\n"
-                      "반드시 메모(거래ID)를 포함해 주세요!")
+                text=(f"Transaction {t_id} has been accepted.\n"
+                      f"Please send the required {tx.amount} USDT to {TRON_WALLET}.\n"
+                      "Include the transaction ID in the memo!")
             )
         except Exception as e:
-            logging.error(f"구매자 알림 전송 오류: {e}")
+            logging.error(f"Buyer notification error: {e}")
     except Exception as e:
         session.rollback()
-        logging.error(f"/accept 오류: {e}")
-        await update.message.reply_text("거래 수락 중 오류가 발생했습니다." + command_guide())
+        logging.error(f"/accept error: {e}")
+        await update.message.reply_text("Error accepting transaction." + command_guide())
     finally:
         session.close()
 
+# /refusal
 async def refusal_transaction(update: Update, context) -> None:
     reset_conversation(context)
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
-        await update.message.reply_text("사용법: /refusal 거래ID" + command_guide())
+        await update.message.reply_text("Usage: /refusal [transactionID]" + command_guide())
         return
     t_id = args[1].strip()
     session = get_db_session()
     try:
         tx = session.query(Transaction).filter_by(transaction_id=t_id, status="pending").first()
         if not tx:
-            await update.message.reply_text("유효한 거래 ID가 아닙니다." + command_guide())
+            await update.message.reply_text("Invalid transaction ID." + command_guide())
             return
         if update.message.from_user.id != tx.seller_id:
-            await update.message.reply_text("판매자만 사용 가능합니다." + command_guide())
+            await update.message.reply_text("Only the seller can refuse this transaction." + command_guide())
             return
         session.delete(tx)
         session.commit()
-        await update.message.reply_text(f"거래 ID {t_id}가 거절되었습니다." + command_guide())
+        await update.message.reply_text(f"Transaction {t_id} has been refused." + command_guide())
     except Exception as e:
         session.rollback()
-        logging.error(f"/refusal 오류: {e}")
-        await update.message.reply_text("거래 거절 중 오류가 발생했습니다." + command_guide())
+        logging.error(f"/refusal error: {e}")
+        await update.message.reply_text("Error refusing transaction." + command_guide())
     finally:
         session.close()
 
-# --- 여기가 핵심: /confirm, /refund 등 ---
+# /confirm – 구매자 거래 완료 확인 및 송금 실행/검증
 async def confirm_payment(update: Update, context) -> None:
     reset_conversation(context)
     args = update.message.text.split()
     if len(args) < 4:
-        await update.message.reply_text("사용법: /confirm 거래ID 구매자지갑주소 txID\n예: /confirm 123456789012 TYYYYYYYYYYYY abcdef1234567890" + command_guide())
+        await update.message.reply_text("Usage: /confirm [transactionID] [buyerWalletAddress] [txID]\nExample: /confirm 123456789012 TYYYYYYYYYYYY abcdef1234567890" + command_guide())
         return
     t_id = args[1].strip()
     buyer_wallet = args[2].strip()
@@ -662,21 +659,21 @@ async def confirm_payment(update: Update, context) -> None:
     try:
         tx = session.query(Transaction).filter_by(transaction_id=t_id, status="accepted").first()
         if not tx:
-            await update.message.reply_text("유효한 거래 ID가 아니거나 아직 수락되지 않은 거래입니다." + command_guide())
+            await update.message.reply_text("Invalid or unaccepted transaction." + command_guide())
             return
         if update.message.from_user.id != tx.buyer_id:
-            await update.message.reply_text("구매자만 사용할 수 있습니다." + command_guide())
+            await update.message.reply_text("Only the buyer can confirm the transaction." + command_guide())
             return
         original_amount = float(tx.amount)
         valid, deposited_amount = check_usdt_payment(original_amount, txid, t_id)
         if not valid:
             if deposited_amount == 0:
-                await update.message.reply_text("블록체인에서 거래를 확인할 수 없거나 메모(거래ID)가 누락되었습니다.\n송금 기록을 확인해주세요." + command_guide())
+                await update.message.reply_text("Unable to verify blockchain transaction or memo missing.\nCheck your transfer record." + command_guide())
                 return
             if deposited_amount < original_amount:
                 refund_result = send_usdt(buyer_wallet, deposited_amount)
                 await update.message.reply_text(
-                    f"입금액({deposited_amount} USDT)이 부족합니다 (필요: {original_amount} USDT).\n전액 환불 처리되었습니다.\n환불 결과: {refund_result}\n정확한 금액을 다시 송금해주세요." + command_guide()
+                    f"Insufficient deposit: received {deposited_amount} USDT (required: {original_amount} USDT).\nFull refund processed.\nRefund result: {refund_result}\nPlease resend the exact amount." + command_guide()
                 )
                 return
             else:
@@ -684,61 +681,63 @@ async def confirm_payment(update: Update, context) -> None:
                 tx.status = "completed"
                 session.commit()
                 await update.message.reply_text(
-                    f"입금액({deposited_amount} USDT)이 원래보다 많습니다.\n초과 송금 시 7.5% 수수료 적용 후 판매자에게 {net_amount} USDT 송금 진행합니다." + command_guide()
+                    f"Over-sent deposit detected: received {deposited_amount} USDT.\nAfter 7.5% fee, {net_amount} USDT will be sent to the seller." + command_guide()
                 )
                 try:
                     seller_wallet = tx.session_id
                     result = send_usdt(seller_wallet, net_amount, memo=t_id)
                     await context.bot.send_message(
                         chat_id=tx.seller_id,
-                        text=(f"거래 ID {t_id}가 완료되었습니다.\n"
-                              f"초과 송금(7.5% 수수료 적용) 후 {net_amount} USDT가 판매자 지갑({seller_wallet})으로 송금되었습니다.\n구매자에게는 초과 금액 환불 및 재송금 안내 바랍니다.")
+                        text=(f"Transaction {t_id} completed with over-sent amount.\n"
+                              f"After 7.5% fee, {net_amount} USDT sent to your wallet ({seller_wallet}).\n"
+                              "Notify buyer to resend the excess amount.")
                     )
                 except Exception as e:
-                    logging.error(f"판매자 초과 송금 오류: {e}")
+                    logging.error(f"Seller over-send error: {e}")
                 return
         tx.status = "completed"
         session.commit()
         net_amount = original_amount * (1 - NORMAL_COMMISSION_RATE)
         await update.message.reply_text(
-            f"입금이 정확히 확인되었습니다 ({original_amount} USDT). 거래가 완료됩니다.\n판매자에게 {net_amount} USDT 송금 진행 중..." + command_guide()
+            f"Exact deposit confirmed ({original_amount} USDT). Completing transaction.\nSeller will receive {net_amount} USDT." + command_guide()
         )
         try:
             seller_wallet = tx.session_id
             result = send_usdt(seller_wallet, net_amount, memo=t_id)
             await context.bot.send_message(
                 chat_id=tx.seller_id,
-                text=(f"거래 ID {t_id}가 완료되었습니다.\n"
-                      f"{net_amount} USDT가 판매자 지갑({seller_wallet})으로 송금되었습니다.\n구매자님, 물건 수령 후 즉시 발송 확인 부탁드립니다!")
+                text=(f"Transaction {t_id} completed.\n"
+                      f"{net_amount} USDT sent to your wallet ({seller_wallet}).\n"
+                      "Buyer, please dispatch your product immediately!")
             )
         except Exception as e:
-            logging.error(f"판매자 정상 송금 오류: {e}")
+            logging.error(f"Seller normal send error: {e}")
     except Exception as e:
         session.rollback()
-        logging.error(f"/confirm 오류: {e}")
-        await update.message.reply_text("거래 완료 처리 중 오류가 발생했습니다." + command_guide())
+        logging.error(f"/confirm error: {e}")
+        await update.message.reply_text("Error confirming transaction." + command_guide())
     finally:
         session.close()
 
-# /rate – 구매자가 거래 후 평점 남기기 (구매자 → 판매자, 판매자 → 구매자)
+# /rate
 async def rate_user(update: Update, context) -> int:
     reset_conversation(context)
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
-        await update.message.reply_text("사용법: /rate 거래ID" + command_guide())
+        await update.message.reply_text("Usage: /rate [transactionID]" + command_guide())
         return WAITING_FOR_RATING
     t_id = args[1].strip()
     session = get_db_session()
     try:
         tx = session.query(Transaction).filter_by(transaction_id=t_id, status="completed").first()
         if not tx:
-            await update.message.reply_text("완료된 거래가 아니거나 유효하지 않은 거래ID입니다." + command_guide())
+            await update.message.reply_text("Transaction not completed or invalid." + command_guide())
             return WAITING_FOR_RATING
         context.user_data["rating_txid"] = t_id
-        await update.message.reply_text("평점 (1~5)을 입력해주세요." + command_guide())
+        await update.message.reply_text("Enter a rating (1-5):" + command_guide())
         return WAITING_FOR_CONFIRMATION
     except Exception as e:
-        logging.error(f"/rate 오류: {e}")
+        logging.error(f"/rate error: {e}")
         return WAITING_FOR_RATING
     finally:
         session.close()
@@ -748,52 +747,53 @@ async def save_rating(update: Update, context) -> int:
     try:
         score = int(update.message.text.strip())
         if not (1 <= score <= 5):
-            await update.message.reply_text("평점은 1~5 사이여야 합니다." + command_guide())
+            await update.message.reply_text("Rating must be between 1 and 5." + command_guide())
             return WAITING_FOR_CONFIRMATION
         t_id = context.user_data.get("rating_txid")
         tx = session.query(Transaction).filter_by(transaction_id=t_id, status="completed").first()
         if not tx:
-            await update.message.reply_text("유효한 거래가 아닙니다." + command_guide())
+            await update.message.reply_text("Invalid transaction." + command_guide())
             return ConversationHandler.END
         target_id = tx.seller_id if update.message.from_user.id == tx.buyer_id else tx.buyer_id
-        new_rating = Rating(user_id=target_id, score=score, review="익명")
+        new_rating = Rating(user_id=target_id, score=score, review="Anonymous")
         session.add(new_rating)
         session.commit()
-        await update.message.reply_text(f"평점 {score}점이 등록되었습니다!" + command_guide())
+        await update.message.reply_text(f"Rating {score} recorded." + command_guide())
         return ConversationHandler.END
     except ValueError:
-        await update.message.reply_text("숫자로 입력해주세요." + command_guide())
+        await update.message.reply_text("Enter a valid number." + command_guide())
         return WAITING_FOR_CONFIRMATION
     except Exception as e:
         session.rollback()
-        logging.error(f"/rate 처리 오류: {e}")
+        logging.error(f"/rate processing error: {e}")
         return WAITING_FOR_CONFIRMATION
     finally:
         session.close()
 
-# /chat – 거래 당사자 간 익명 채팅 (텍스트 및 파일 지원)
+# /chat
 async def start_chat(update: Update, context) -> None:
     reset_conversation(context)
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
-        await update.message.reply_text("사용법: /chat 거래ID" + command_guide())
+        await update.message.reply_text("Usage: /chat [transactionID]" + command_guide())
         return
     t_id = args[1].strip()
     session = get_db_session()
     try:
         tx = session.query(Transaction).filter(Transaction.transaction_id == t_id, Transaction.status.in_(["accepted", "completed"])).first()
         if not tx:
-            await update.message.reply_text("유효한 거래가 아니거나 아직 수락되지 않은 거래입니다." + command_guide())
+            await update.message.reply_text("Invalid or unaccepted transaction." + command_guide())
             return
-        if update.message.from_user.id not in [tx.buyer_id, tx.seller_id]:
-            await update.message.reply_text("이 거래의 당사자가 아니므로 채팅을 시작할 수 없습니다." + command_guide())
+        user_id = update.message.from_user.id
+        if user_id not in [tx.buyer_id, tx.seller_id]:
+            await update.message.reply_text("You are not a party to this transaction." + command_guide())
             return
         active_chats[t_id] = (tx.buyer_id, tx.seller_id)
         context.user_data["current_chat_tx"] = t_id
-        await update.message.reply_text(f"거래 ID {t_id}에 대한 익명 채팅을 시작합니다.\n텍스트나 파일(사진/문서 등)을 전송하면 상대방에게 전달됩니다." + command_guide())
+        await update.message.reply_text(f"Starting anonymous chat for transaction {t_id}.\nText or file (photo/document) will be relayed to the other party." + command_guide())
     except Exception as e:
-        logging.error(f"/chat 오류: {e}")
-        await update.message.reply_text("채팅 시작 중 오류가 발생했습니다." + command_guide())
+        logging.error(f"/chat error: {e}")
+        await update.message.reply_text("Error starting chat." + command_guide())
     finally:
         session.close()
 
@@ -810,79 +810,78 @@ async def relay_message(update: Update, context) -> None:
         if update.message.document:
             file_id = update.message.document.file_id
             file_name = update.message.document.file_name
-            await context.bot.send_document(chat_id=partner, document=file_id, caption=f"[파일] {file_name}")
+            await context.bot.send_document(chat_id=partner, document=file_id, caption=f"[File] {file_name}")
         elif update.message.photo:
             photo = update.message.photo[-1]
-            await context.bot.send_photo(chat_id=partner, photo=photo.file_id, caption="[사진]")
+            await context.bot.send_photo(chat_id=partner, photo=photo.file_id, caption="[Photo]")
         else:
-            await context.bot.send_message(chat_id=partner, text=f"[채팅] {update.message.text}")
+            await context.bot.send_message(chat_id=partner, text=f"[Chat] {update.message.text}")
     except Exception as e:
-        logging.error(f"채팅 메시지 전송 오류: {e}")
+        logging.error(f"Chat relay error: {e}")
 
-# /off – 거래 중단
+# /off
 async def off_transaction(update: Update, context) -> None:
     reset_conversation(context)
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
-        await update.message.reply_text("사용법: /off 거래ID" + command_guide())
+        await update.message.reply_text("Usage: /off [transactionID]" + command_guide())
         return
     t_id = args[1].strip()
     session = get_db_session()
     try:
         tx = session.query(Transaction).filter_by(transaction_id=t_id).first()
         if not tx:
-            await update.message.reply_text("유효한 거래 ID가 아닙니다." + command_guide())
+            await update.message.reply_text("Invalid transaction ID." + command_guide())
             return
         if tx.status not in ["pending", "accepted"]:
-            await update.message.reply_text("이미 진행 중이거나 완료된 거래는 취소할 수 없습니다." + command_guide())
+            await update.message.reply_text("Cannot cancel a transaction that is already in progress or completed." + command_guide())
             return
         if update.message.from_user.id not in [tx.buyer_id, tx.seller_id]:
-            await update.message.reply_text("이 거래의 당사자가 아닙니다." + command_guide())
+            await update.message.reply_text("You are not a party to this transaction." + command_guide())
             return
         tx.status = "cancelled"
         session.commit()
         if t_id in active_chats:
             active_chats.pop(t_id)
-        await update.message.reply_text(f"거래 ID {t_id}가 중단되었습니다." + command_guide())
+        await update.message.reply_text(f"Transaction {t_id} has been cancelled." + command_guide())
     except Exception as e:
         session.rollback()
-        logging.error(f"/off 오류: {e}")
-        await update.message.reply_text("거래 중단 처리 중 오류가 발생했습니다." + command_guide())
+        logging.error(f"/off error: {e}")
+        await update.message.reply_text("Error cancelling transaction." + command_guide())
     finally:
         session.close()
 
-# /refund – 구매자 환불 요청
+# /refund
 async def refund_request(update: Update, context) -> int:
     reset_conversation(context)
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
-        await update.message.reply_text("사용법: /refund 거래ID\n예: /refund 123456789012" + command_guide())
+        await update.message.reply_text("Usage: /refund [transactionID]\nExample: /refund 123456789012" + command_guide())
         return ConversationHandler.END
     t_id = args[1].strip()
     session = get_db_session()
     try:
         tx = session.query(Transaction).filter_by(transaction_id=t_id, status="accepted").first()
         if not tx:
-            await update.message.reply_text("유효한 거래 ID가 아니거나 환불 요청이 불가능합니다." + command_guide())
+            await update.message.reply_text("Invalid transaction ID or refund not possible." + command_guide())
             return ConversationHandler.END
         if update.message.from_user.id != tx.buyer_id:
-            await update.message.reply_text("구매자만 환불 요청이 가능합니다." + command_guide())
+            await update.message.reply_text("Only the buyer can request a refund." + command_guide())
             return ConversationHandler.END
         expected_amount = float(tx.amount)
         valid, deposited_amount = check_usdt_payment(expected_amount, "", t_id)
         if not valid:
-            await update.message.reply_text("입금 확인에 문제가 있습니다." + command_guide())
+            await update.message.reply_text("Deposit not verified or transaction data is incorrect." + command_guide())
             return ConversationHandler.END
+        # 환불 시, 중개 수수료 2.5%만 차감 (즉, 구매자에게 돌려줄 금액)
         refund_amount = expected_amount * (1 - (NORMAL_COMMISSION_RATE / 2))
         context.user_data["refund_txid"] = t_id
         context.user_data["refund_amount"] = refund_amount
-        await update.message.reply_text(
-            f"환불을 진행합니다. 구매자 지갑 주소를 입력해주세요.\n(환불 금액: {refund_amount} USDT, 수수료: 2.5% 적용)" + command_guide()
-        )
+        await update.message.reply_text(f"Processing refund. Please enter your wallet address.\n(Refund Amount: {refund_amount} USDT, fee: 2.5% applied)" + command_guide())
         return WAITING_FOR_REFUND_WALLET
     except Exception as e:
-        logging.error(f"/refund 오류: {e}")
-        await update.message.reply_text("환불 요청 중 오류가 발생했습니다." + command_guide())
+        logging.error(f"/refund error: {e}")
+        await update.message.reply_text("Error during refund request." + command_guide())
         return ConversationHandler.END
     finally:
         session.close()
@@ -893,62 +892,58 @@ async def process_refund(update: Update, context) -> int:
     refund_amount = context.user_data.get("refund_amount")
     try:
         result = send_usdt(buyer_wallet, refund_amount, memo=t_id)
-        await update.message.reply_text(
-            f"환불 요청이 완료되었습니다. {refund_amount} USDT가 {buyer_wallet}로 송금되었습니다.\n거래 ID: {t_id}\n송금 결과: {result}" + command_guide()
-        )
+        await update.message.reply_text(f"Refund processed: {refund_amount} USDT sent to {buyer_wallet}.\nTransaction ID: {t_id}\nResult: {result}" + command_guide())
         return ConversationHandler.END
     except Exception as e:
-        logging.error(f"환불 송금 오류: {e}")
-        await update.message.reply_text("환불 송금 중 오류가 발생했습니다. 다시 지갑 주소를 입력해주세요." + command_guide())
+        logging.error(f"Refund transfer error: {e}")
+        await update.message.reply_text("Error processing refund. Please re-enter your wallet address." + command_guide())
         return WAITING_FOR_REFUND_WALLET
 
-# 관리자 전용 강제 종료 /warexit
+# /warexit (Admin only)
 async def warexit_command(update: Update, context) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
-        await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다." + command_guide())
+        await update.message.reply_text("Admin only." + command_guide())
         return
     reset_conversation(context)
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
-        await update.message.reply_text("사용법: /warexit 거래ID" + command_guide())
+        await update.message.reply_text("Usage: /warexit [transactionID]" + command_guide())
         return
     t_id = args[1].strip()
     session = get_db_session()
     try:
         tx = session.query(Transaction).filter_by(transaction_id=t_id).first()
         if not tx:
-            await update.message.reply_text("유효한 거래 ID가 아닙니다." + command_guide())
+            await update.message.reply_text("Invalid transaction ID." + command_guide())
             return
         tx.status = "cancelled"
         session.commit()
         if t_id in active_chats:
             active_chats.pop(t_id)
-        await update.message.reply_text(f"[관리자] 거래 ID {t_id}가 강제 종료되었습니다." + command_guide())
+        await update.message.reply_text(f"[Admin] Transaction {t_id} forcefully terminated." + command_guide())
     except Exception as e:
         session.rollback()
-        logging.error(f"/warexit 오류: {e}")
-        await update.message.reply_text("강제 종료 처리 중 오류가 발생했습니다." + command_guide())
+        logging.error(f"/warexit error: {e}")
+        await update.message.reply_text("Error during force termination." + command_guide())
     finally:
         session.close()
 
+# /exit
 async def exit_to_start(update: Update, context) -> int:
     if "current_chat_tx" in context.user_data:
-        await update.message.reply_text("거래 채팅 중에는 /exit를 사용할 수 없습니다." + command_guide())
+        await update.message.reply_text("Cannot exit while in chat." + command_guide())
         return ConversationHandler.END
-    reset_conversation(context)
-    await update.message.reply_text("초기 화면으로 돌아갑니다. /menu로 메인 메뉴를 불러오세요." + command_guide())
+    context.user_data.clear()
+    await update.message.reply_text("Returning to start. Use /start to begin." + command_guide())
     return ConversationHandler.END
 
-# --------------------------------------------------
 # 에러 핸들러
 async def error_handler(update: object, context) -> None:
-    logging.error("오류 발생", exc_info=context.error)
+    logging.error("Error occurred", exc_info=context.error)
     if update and hasattr(update, "message") and update.message:
-        await update.message.reply_text("오류가 발생했습니다. 다시 시도해주세요.", reply_markup=get_main_menu_keyboard())
+        await update.message.reply_text("Error occurred. Please try again.", reply_markup=get_main_menu_keyboard())
 
-# --------------------------------------------------
 # 대화형 핸들러 설정 (버튼 기반 + 명령어 기반)
-# 버튼 기반 /sell 대화 흐름
 sell_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(sell_step_2, pattern="^menu_sell$")],
     states={
@@ -956,7 +951,7 @@ sell_handler = ConversationHandler(
         "sell_price": [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_step_3)],
         "sell_type": [CallbackQueryHandler(sell_finish, pattern="^sell_type_")]
     },
-    fallbacks=[CommandHandler("exit", lambda update, context: update.message.reply_text("취소되었습니다.", reply_markup=get_main_menu_keyboard()))],
+    fallbacks=[CommandHandler("exit", lambda update, context: update.message.reply_text("Cancelled.", reply_markup=get_main_menu_keyboard()))],
 )
 
 cancel_handler = ConversationHandler(
@@ -964,7 +959,7 @@ cancel_handler = ConversationHandler(
     states={
         WAITING_FOR_CANCEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, cancel_item)]
     },
-    fallbacks=[CommandHandler("exit", lambda update, context: update.message.reply_text("취소되었습니다.", reply_markup=get_main_menu_keyboard()))],
+    fallbacks=[CommandHandler("exit", lambda update, context: update.message.reply_text("Cancelled.", reply_markup=get_main_menu_keyboard()))],
 )
 
 rate_handler = ConversationHandler(
@@ -972,7 +967,7 @@ rate_handler = ConversationHandler(
     states={
         WAITING_FOR_CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_rating)]
     },
-    fallbacks=[CommandHandler("exit", lambda update, context: update.message.reply_text("취소되었습니다.", reply_markup=get_main_menu_keyboard()))],
+    fallbacks=[CommandHandler("exit", lambda update, context: update.message.reply_text("Cancelled.", reply_markup=get_main_menu_keyboard()))],
 )
 
 refund_handler = ConversationHandler(
@@ -980,10 +975,9 @@ refund_handler = ConversationHandler(
     states={
         WAITING_FOR_REFUND_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_refund)]
     },
-    fallbacks=[CommandHandler("exit", lambda update, context: update.message.reply_text("취소되었습니다.", reply_markup=get_main_menu_keyboard()))],
+    fallbacks=[CommandHandler("exit", lambda update, context: update.message.reply_text("Cancelled.", reply_markup=get_main_menu_keyboard()))],
 )
 
-# --------------------------------------------------
 # 앱 초기화 및 핸들러 등록
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_API_KEY).build()
@@ -1011,17 +1005,19 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("exit", exit_to_start))
     app.add_handler(refund_handler)
 
-    # 대화형 핸들러 등록 (버튼 메뉴 선택 후 텍스트 입력 처리)
+    # 대화형 핸들러 등록 (버튼 메뉴 후 텍스트 입력 처리)
     app.add_handler(cancel_handler)
     app.add_handler(rate_handler)
 
-    # 텍스트 및 파일 메시지 중계 (채팅)
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, text_input_handler))
+    # 텍스트 입력 핸들러 (버튼 메뉴 후 필요한 입력 처리)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input_handler))
+
+    # 파일 및 텍스트 메시지 중계 (채팅)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 
     app.add_error_handler(error_handler)
 
-    # 자동 송금 확인 작업을 60초마다 실행 (첫 실행은 10초 후)
+    # 자동 송금 확인 작업 (60초마다 실행, 첫 실행은 10초 후)
     app.job_queue.run_repeating(auto_verify_deposits, interval=60, first=10)
 
     app.run_polling()
