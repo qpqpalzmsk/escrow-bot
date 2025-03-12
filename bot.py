@@ -17,10 +17,9 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-# SQLAlchemy 임포트
+# SQLAlchemy 임포트 (최신 버전에 맞게 orm에서 가져옵니다)
 from sqlalchemy import create_engine, Column, Integer, String, DECIMAL, BigInteger, Text, TIMESTAMP, text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
 
 from tronpy import Tron
 from tronpy.providers import HTTPProvider
@@ -35,7 +34,7 @@ logging.basicConfig(
 # -------------------------------------------------------------------
 # 환경 변수 / 전역 변수
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")        # 봇 토큰 (필수)
-DATABASE_URL = os.getenv("DATABASE_URL")                # "postgres://user:pass@host:5432/dbname"
+DATABASE_URL = os.getenv("DATABASE_URL")                # 예: "postgres://user:pass@host:5432/dbname"
 TRON_API = os.getenv("TRON_API") or "https://api.trongrid.io"
 TRON_API_KEY = os.getenv("TRON_API_KEY") or ""
 TRON_WALLET = "TT8AZ3dCpgWJQSw9EXhhyR3uKj81jXxbRB"
@@ -1142,7 +1141,7 @@ sell_handler = ConversationHandler(
     },
     fallbacks=[
         CommandHandler("exit", exit_to_start),
-        MessageHandler(filters.COMMAND, exit_to_start),  
+        MessageHandler(filters.COMMAND, exit_to_start),
     ],
 )
 
@@ -1241,7 +1240,8 @@ def main():
         await app.initialize()
         await app.start()
         await app.updater.start_polling()
-        await app.updater.idle()
+        # updater.idle() 대신 무한 대기를 사용합니다.
+        await asyncio.Event().wait()
 
     async def run_health():
         from aiohttp import web

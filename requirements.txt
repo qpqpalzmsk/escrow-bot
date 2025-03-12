@@ -4,3 +4,4 @@ tronpy
 sqlalchemy
 requests
 aiohttp
+httpx
