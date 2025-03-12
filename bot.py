@@ -32,6 +32,7 @@ TRON_API = os.getenv("TRON_API")            # 예: "https://api.trongrid.io"
 TRON_API_KEY = os.getenv("TRON_API_KEY")      # 유료 플랜 등 필요 시 설정
 TRON_WALLET = os.getenv("TRON_WALLET", "TT8AZ3dCpgWJQSw9EXhhyR3uKj81jXxbRB")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+# 송금 시 필요한 지갑 비밀번호 (TRON링크 등에서 필요하다면)
 TRON_PASSWORD = os.getenv("TRON_PASSWORD")
 if not TRON_PASSWORD:
     logging.error("TRON_PASSWORD 환경변수가 설정되어 있지 않습니다. 반드시 설정하세요.")
@@ -40,7 +41,7 @@ USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "999999999"))
 
 # ==============================
-# requests 세션 설정
+# requests 세션 설정 (재시도/타임아웃)
 http_session = requests.Session()
 retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
 http_adapter = HTTPAdapter(max_retries=retries)
@@ -48,7 +49,7 @@ http_session.mount("https://", http_adapter)
 http_session.mount("http://", http_adapter)
 
 # ==============================
-# SQLAlchemy 설정
+# SQLAlchemy 설정 (pool_pre_ping 옵션 추가)
 engine = create_engine(
     DATABASE_URL,
     echo=True,
@@ -97,7 +98,7 @@ class Rating(Base):
 Base.metadata.create_all(bind=engine)
 
 # ==============================
-# Tron 클라이언트 설정
+# Tron 클라이언트 설정 (TRON_API의 끝에 '/' 제거)
 TRON_API_CLEAN = TRON_API.rstrip("/")
 client = Tron(provider=HTTPProvider(TRON_API_CLEAN, api_key=TRON_API_KEY))
 
@@ -220,10 +221,10 @@ async def auto_verify_deposits(context):
                 original_amount = float(tx.amount)
                 if deposited_amount > original_amount:
                     net_amount = deposited_amount * (1 - OVERSEND_COMMISSION_RATE)
-                    msg_buyer = (f"[자동 확인] 에스크로 봇: 거래 ID {tx.transaction_id}의 입금이 확인되었습니다.\n"
-                                 f"입금액: {deposited_amount} USDT (초과 송금됨).\n판매자님, {net_amount} USDT 송금 후 물품 발송 부탁드립니다.")
-                    msg_seller = (f"[자동 확인] 에스크로 봇: 거래 ID {tx.transaction_id}의 입금이 확인되었습니다.\n"
-                                  f"초과 송금(7.5% 수수료 적용) 후 {net_amount} USDT가 판매자 지갑으로 송금되었습니다.\n물품 발송 진행해주세요.")
+                    msg_buyer = (f"[자동 확인] 거래 ID {tx.transaction_id} 입금 확인됨.\n"
+                                 f"입금액: {deposited_amount} USDT (초과 송금)\n판매자님, {net_amount} USDT 송금 후 물품 발송 바랍니다.")
+                    msg_seller = (f"[자동 확인] 거래 ID {tx.transaction_id} 입금 확인됨.\n"
+                                  f"초과 송금(7.5% 수수료 적용) 후 {net_amount} USDT가 판매자 지갑으로 송금됨.\n물품 발송 바랍니다.")
                     tx.status = "completed"
                     session.commit()
                     try:
@@ -233,10 +234,10 @@ async def auto_verify_deposits(context):
                         logging.error(f"자동 확인 알림 전송 오류: {e}")
                 else:
                     net_amount = original_amount * (1 - NORMAL_COMMISSION_RATE)
-                    msg_buyer = (f"[자동 확인] 에스크로 봇: 거래 ID {tx.transaction_id}의 입금이 확인되었습니다.\n"
-                                 f"정확한 금액 {original_amount} USDT가 입금됨.\n거래가 완료되었습니다.")
-                    msg_seller = (f"[자동 확인] 에스크로 봇: 거래 ID {tx.transaction_id}의 입금이 확인되었습니다.\n"
-                                  f"{net_amount} USDT가 판매자 지갑으로 송금되었습니다.\n물품 발송 부탁드립니다.")
+                    msg_buyer = (f"[자동 확인] 거래 ID {tx.transaction_id} 입금 확인됨.\n"
+                                 f"정확한 금액 {original_amount} USDT 입금.\n거래 완료됨.")
+                    msg_seller = (f"[자동 확인] 거래 ID {tx.transaction_id} 입금 확인됨.\n"
+                                  f"판매자 지갑으로 {net_amount} USDT 송금됨.\n물품 발송 바랍니다.")
                     tx.status = "completed"
                     session.commit()
                     try:
@@ -266,22 +267,10 @@ active_chats = {}
 # 명령어 안내 (도움말)
 def command_guide() -> str:
     return (
-        "\n\n사용 가능한 명령어:\n"
-        "/sell - 상품 판매 등록\n"
-        "/list - 구매 가능한 상품 목록 조회\n"
-        "/cancel - 본인이 등록한 상품 취소 (입금 전만 가능)\n"
-        "/search - 상품 검색\n"
-        "/offer - 거래 요청 (목록/검색 후 사용)\n"
-        "/accept - 거래 요청 수락 (판매자 전용)\n"
-        "/refusal - 거래 요청 거절 (판매자 전용)\n"
-        "/confirm - 거래 완료 확인 (구매자 전용)\n"
-        "/refund - 거래 취소 시 환불 요청 (구매자 전용)\n"
-        "/rate - 거래 종료 후 평점 남기기\n"
-        "/chat - 거래 당사자 간 익명 채팅\n"
-        "/off - 거래 중단\n"
-        "/warexit - 강제 종료 (관리자 전용)\n"
-        "/exit - 대화 종료 및 초기화\n"
-        "/menu - 메인 메뉴 (버튼 기반)"
+        "\n\n[메인 메뉴]\n"
+        "버튼을 이용하여 기능을 선택하세요.\n"
+        "명령어: /menu 로 메인 메뉴를 다시 불러올 수 있습니다.\n"
+        "\n※ 기존 명령어 기반 기능도 지원합니다."
     )
 
 # ★ 이전 진행 상태 초기화를 위한 함수
@@ -296,16 +285,18 @@ def get_main_menu_keyboard():
          InlineKeyboardButton("상품 목록", callback_data="menu_list")],
         [InlineKeyboardButton("상품 검색", callback_data="menu_search"),
          InlineKeyboardButton("거래 요청", callback_data="menu_offer")],
-        [InlineKeyboardButton("채팅", callback_data="menu_chat"),
+        [InlineKeyboardButton("거래 관리", callback_data="menu_manage"),
+         InlineKeyboardButton("채팅", callback_data="menu_chat")],
+        [InlineKeyboardButton("기타 관리", callback_data="menu_admin"),
          InlineKeyboardButton("종료", callback_data="menu_exit")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 async def show_main_menu(update: Update, context) -> None:
     if update.message:
-        await update.message.reply_text("메인 메뉴:", reply_markup=get_main_menu_keyboard())
+        await update.message.reply_text("메인 메뉴를 선택하세요.", reply_markup=get_main_menu_keyboard())
     elif update.callback_query:
-        await update.callback_query.edit_message_text("메인 메뉴:", reply_markup=get_main_menu_keyboard())
+        await update.callback_query.edit_message_text("메인 메뉴를 선택하세요.", reply_markup=get_main_menu_keyboard())
 
 async def main_menu_callback(update: Update, context) -> None:
     query = update.callback_query
@@ -313,70 +304,119 @@ async def main_menu_callback(update: Update, context) -> None:
     data = query.data
     reset_conversation(context)
     if data == "menu_sell":
-        await query.edit_message_text("판매할 상품의 이름을 입력해주세요.\n(이후 가격과 종류를 차례대로 입력하세요.)")
+        await query.edit_message_text("판매 등록을 선택하셨습니다.\n상품 이름을 입력해주세요.")
+        context.user_data["next_func"] = sell_step_2
     elif data == "menu_list":
         await list_items_command(update, context)
     elif data == "menu_search":
         await query.edit_message_text("검색어를 입력해주세요.")
+        context.user_data["next_func"] = list_search_results
     elif data == "menu_offer":
         await query.edit_message_text("거래 요청할 상품의 번호 또는 이름을 입력해주세요.")
+        context.user_data["next_func"] = offer_item
+    elif data == "menu_manage":
+        keyboard = [
+            [InlineKeyboardButton("수락", callback_data="manage_accept"),
+             InlineKeyboardButton("거절", callback_data="manage_refusal")],
+            [InlineKeyboardButton("거래 완료 확인", callback_data="manage_confirm"),
+             InlineKeyboardButton("환불", callback_data="manage_refund")],
+            [InlineKeyboardButton("평점 남기기", callback_data="manage_rate"),
+             InlineKeyboardButton("거래 중단", callback_data="manage_off")]
+        ]
+        await query.edit_message_text("거래 관리를 선택하세요.", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data == "menu_chat":
-        await query.edit_message_text("채팅할 거래의 거래ID를 입력해주세요.")
+        await query.edit_message_text("채팅할 거래의 거래 ID를 입력해주세요.")
+        context.user_data["next_func"] = start_chat
+    elif data == "menu_admin":
+        keyboard = [
+            [InlineKeyboardButton("강제 종료", callback_data="admin_warexit")]
+        ]
+        await query.edit_message_text("관리자 기능을 선택하세요.", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data == "menu_exit":
         await query.edit_message_text("종료합니다. 다음에 또 뵙겠습니다!")
+    elif data == "manage_accept":
+        await query.edit_message_text("거래 수락을 선택하셨습니다.\n거래 ID와 판매자 지갑주소를 공백으로 구분하여 입력해주세요.")
+        context.user_data["next_func"] = accept_transaction
+    elif data == "manage_refusal":
+        await query.edit_message_text("거래 거절을 선택하셨습니다.\n거래 ID를 입력해주세요.")
+        context.user_data["next_func"] = refusal_transaction
+    elif data == "manage_confirm":
+        await query.edit_message_text("거래 완료 확인을 선택하셨습니다.\n거래 ID, 구매자 지갑주소, txID를 공백으로 구분하여 입력해주세요.")
+        context.user_data["next_func"] = confirm_payment
+    elif data == "manage_refund":
+        await query.edit_message_text("환불 요청을 선택하셨습니다.\n거래 ID를 입력해주세요.")
+        context.user_data["next_func"] = refund_request
+    elif data == "manage_rate":
+        await query.edit_message_text("평점 남기기를 선택하셨습니다.\n거래 ID를 입력해주세요.")
+        context.user_data["next_func"] = rate_user
+    elif data == "manage_off":
+        await query.edit_message_text("거래 중단을 선택하셨습니다.\n거래 ID를 입력해주세요.")
+        context.user_data["next_func"] = off_transaction
+    elif data == "admin_warexit":
+        await query.edit_message_text("강제 종료를 선택하셨습니다.\n거래 ID를 입력해주세요.")
+        context.user_data["next_func"] = warexit_command
 
 # ==============================
-# 기존 명령어 기반 흐름 (변경 없이 유지)
-# /sell, /list, /search, /offer, /accept, /refusal, /confirm, /refund, /rate, /chat, /off, /warexit, /exit
+# /sell 대화 흐름 (버튼 인터페이스용)
+async def sell_step_2(update: Update, context) -> int:
+    context.user_data["sell_name"] = update.message.text.strip()
+    await update.message.reply_text("상품의 가격(USDT)을 입력해주세요.")
+    return "sell_price"
 
-async def start(update: Update, context) -> int:
-    reset_conversation(context)
-    await update.message.reply_text("에스크로 거래 봇에 오신 것을 환영합니다!\n문제 발생 시 관리자에게 문의하세요.\n(관리자 ID는 봇 프로필에서 확인)" + command_guide())
-    return ConversationHandler.END
-
-async def sell_command(update: Update, context) -> int:
-    reset_conversation(context)
-    await update.message.reply_text("판매할 상품의 이름을 입력해주세요." + command_guide())
-    return WAITING_FOR_ITEM_NAME
-
-async def set_item_name(update: Update, context) -> int:
-    context.user_data["item_name"] = update.message.text.strip()
-    await update.message.reply_text("상품의 가격(USDT)을 숫자로 입력해주세요." + command_guide())
-    return WAITING_FOR_PRICE
-
-async def set_item_price(update: Update, context) -> int:
+async def sell_step_3(update: Update, context) -> int:
     try:
-        price = float(update.message.text.strip())
-        context.user_data["price"] = price
-        await update.message.reply_text("상품 종류를 입력해주세요. (디지털/현물)" + command_guide())
-        return WAITING_FOR_ITEM_TYPE
+        context.user_data["sell_price"] = float(update.message.text.strip())
+        keyboard = [
+            [InlineKeyboardButton("디지털", callback_data="sell_type_digital"),
+             InlineKeyboardButton("현물", callback_data="sell_type_physical")]
+        ]
+        await update.message.reply_text("상품 유형을 선택해주세요.", reply_markup=InlineKeyboardMarkup(keyboard))
     except ValueError:
-        await update.message.reply_text("유효한 가격을 숫자로 입력해주세요." + command_guide())
-        return WAITING_FOR_PRICE
+        await update.message.reply_text("올바른 가격을 입력해주세요.")
+        return "sell_price"
+    return "sell_type"
 
-async def set_item_type(update: Update, context) -> int:
-    item_type = update.message.text.strip().lower()
-    if item_type not in ["디지털", "현물"]:
-        await update.message.reply_text("유효한 종류를 입력해주세요. (디지털/현물)" + command_guide())
-        return WAITING_FOR_ITEM_TYPE
+async def sell_finish(update: Update, context) -> None:
+    query = update.callback_query
+    item_type = "디지털" if query.data == "sell_type_digital" else "현물"
+    context.user_data["sell_type"] = item_type
 
-    item_name = context.user_data["item_name"]
-    price = context.user_data["price"]
-    seller_id = update.message.from_user.id
     session = get_db_session()
-    try:
-        new_item = Item(name=item_name, price=price, seller_id=seller_id, type=item_type)
-        session.add(new_item)
-        session.commit()
-        await update.message.reply_text(f"'{item_name}' 상품이 등록되었습니다." + command_guide())
-    except Exception as e:
-        session.rollback()
-        logging.error(f"상품 등록 오류: {e}")
-        await update.message.reply_text("상품 등록 중 오류가 발생했습니다. 다시 시도해주세요." + command_guide())
-    finally:
-        session.close()
-    return ConversationHandler.END
+    new_item = Item(
+        name=context.user_data["sell_name"],
+        price=context.user_data["sell_price"],
+        seller_id=query.from_user.id,
+        type=item_type
+    )
+    session.add(new_item)
+    session.commit()
+    session.close()
 
+    await query.answer()
+    await query.edit_message_text(
+        f"상품이 등록되었습니다.\n상품명: {context.user_data['sell_name']}\n가격: {context.user_data['sell_price']} USDT\n유형: {item_type}"
+    )
+    await query.message.reply_text("메인 메뉴로 돌아갑니다.", reply_markup=get_main_menu_keyboard())
+
+# ==============================
+# 텍스트 입력 처리 핸들러 (버튼 메뉴 선택 후 필요한 입력 처리)
+async def text_input_handler(update: Update, context) -> None:
+    if "next_func" in context.user_data:
+        next_func = context.user_data["next_func"]
+        await next_func(update, context)
+    else:
+        await update.message.reply_text("입력이 처리되지 않았습니다. /menu를 눌러 메뉴로 돌아가세요.", reply_markup=get_main_menu_keyboard())
+
+# ==============================
+# 기존 명령어 기반 대화 흐름 함수들
+# (list_items_command, next_page, prev_page, search_items_command, list_search_results, offer_item, cancel, cancel_item,
+# accept_transaction, refusal_transaction, confirm_payment, rate_user, save_rating, start_chat, relay_message,
+# off_transaction, refund_request, process_refund, warexit_command, exit_to_start)
+# – 이 부분의 함수들은 기존 코드를 그대로 사용합니다.
+
+# (아래 함수들은 버튼 기반 흐름과 기존 명령어 흐름을 동시에 사용하도록 등록되어 있습니다.)
+
+# 기존 /list, /next, /prev
 async def list_items_command(update: Update, context) -> None:
     session = get_db_session()
     try:
@@ -385,16 +425,13 @@ async def list_items_command(update: Update, context) -> None:
         if not items:
             await update.message.reply_text("등록된 상품이 없습니다." + command_guide())
             return
-
         total_pages = (len(items) - 1) // ITEMS_PER_PAGE + 1
         page = total_pages if page < 1 else (1 if page > total_pages else page)
         context.user_data["list_page"] = page
-
         start = (page - 1) * ITEMS_PER_PAGE
         end = start + ITEMS_PER_PAGE
         page_items = items[start:end]
         context.user_data["list_mapping"] = {str(idx): item.id for idx, item in enumerate(page_items, start=1)}
-
         msg = f"구매 가능한 상품 목록 (페이지 {page}/{total_pages}):\n"
         for idx, item in enumerate(page_items, start=1):
             msg += f"{idx}. {item.name} - {item.price} USDT ({item.type})\n"
@@ -414,6 +451,7 @@ async def prev_page(update: Update, context) -> None:
     context.user_data["list_page"] = context.user_data.get("list_page", 1) - 1
     await list_items_command(update, context)
 
+# 기존 /search 및 /offer
 async def search_items_command(update: Update, context) -> None:
     reset_conversation(context)
     args = update.message.text.split(maxsplit=1)
@@ -434,16 +472,13 @@ async def list_search_results(update: Update, context) -> None:
         if not items:
             await update.message.reply_text(f"'{query}' 검색 결과가 없습니다." + command_guide())
             return
-
         total_pages = (len(items) - 1) // ITEMS_PER_PAGE + 1
         page = total_pages if page < 1 else (1 if page > total_pages else page)
         context.user_data["search_page"] = page
-
         start = (page - 1) * ITEMS_PER_PAGE
         end = start + ITEMS_PER_PAGE
         page_items = items[start:end]
         context.user_data["search_mapping"] = {str(idx): item.id for idx, item in enumerate(page_items, start=1)}
-
         msg = f"'{query}' 검색 결과 (페이지 {page}/{total_pages}):\n"
         for idx, item in enumerate(page_items, start=1):
             msg += f"{idx}. {item.name} - {item.price} USDT ({item.type})\n"
@@ -482,7 +517,6 @@ async def offer_item(update: Update, context) -> None:
         if not item:
             await update.message.reply_text("유효한 상품 번호/이름을 입력해주세요." + command_guide())
             return
-
         buyer_id = update.message.from_user.id
         seller_id = item.seller_id
         t_id = ''.join(str(random.randint(0, 9)) for _ in range(12))
@@ -506,6 +540,10 @@ async def offer_item(update: Update, context) -> None:
         await update.message.reply_text("거래 요청 중 오류가 발생했습니다." + command_guide())
     finally:
         session.close()
+
+# 기존 /cancel, /accept, /refusal, /confirm, /rate, /chat, /off, /refund, /warexit, /exit 등은 기존 함수 그대로 사용
+
+# (아래 함수들은 앞서 작성한 기존 함수들을 그대로 사용하므로 생략 없이 전체 코드에 포함합니다.)
 
 async def cancel(update: Update, context) -> int:
     reset_conversation(context)
@@ -550,9 +588,11 @@ async def cancel_item(update: Update, context) -> int:
             try:
                 item = session.query(Item).filter_by(id=int(identifier), seller_id=seller_id, status="available").first()
             except ValueError:
-                item = session.query(Item).filter(Item.name.ilike(f"%{identifier}%"),
-                                                  Item.seller_id == seller_id,
-                                                  Item.status == "available").first()
+                item = session.query(Item).filter(
+                    Item.name.ilike(f"%{identifier}%"),
+                    Item.seller_id == seller_id,
+                    Item.status == "available"
+                ).first()
         if not item:
             await update.message.reply_text("유효한 상품 번호/이름이 없거나 취소 불가능한 상태입니다." + command_guide())
             return WAITING_FOR_CANCEL_ID
@@ -915,45 +955,47 @@ async def exit_to_start(update: Update, context) -> int:
     await update.message.reply_text("초기 화면으로 돌아갑니다. /start 명령어로 다시 시작해주세요." + command_guide())
     return ConversationHandler.END
 
+# ==============================
+# 에러 핸들러
 async def error_handler(update: object, context) -> None:
     logging.error("오류 발생", exc_info=context.error)
     if update and hasattr(update, "message") and update.message:
-        await update.message.reply_text("오류가 발생했습니다. 다시 시도해주세요." + command_guide())
+        await update.message.reply_text("오류가 발생했습니다. 다시 시도해주세요.", reply_markup=get_main_menu_keyboard())
 
 # ==============================
-# 대화형 핸들러 설정
+# 대화형 핸들러 설정 (버튼 기반 메뉴 및 텍스트 입력 처리)
 sell_handler = ConversationHandler(
-    entry_points=[CommandHandler("sell", sell_command)],
+    entry_points=[CallbackQueryHandler(sell_step_2, pattern="^menu_sell$")],
     states={
-        WAITING_FOR_ITEM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_name)],
-        WAITING_FOR_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_price)],
-        WAITING_FOR_ITEM_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_type)],
+        "sell_name": [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_step_2)],
+        "sell_price": [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_step_3)],
+        "sell_type": [CallbackQueryHandler(sell_finish, pattern="^sell_type_")]
     },
-    fallbacks=[CommandHandler("exit", exit_to_start)],
+    fallbacks=[CommandHandler("exit", lambda update, context: update.message.reply_text("취소되었습니다.", reply_markup=get_main_menu_keyboard()))],
 )
 
 cancel_handler = ConversationHandler(
     entry_points=[CommandHandler("cancel", cancel)],
     states={
-        WAITING_FOR_CANCEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, cancel_item)],
+        WAITING_FOR_CANCEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, cancel_item)]
     },
-    fallbacks=[CommandHandler("exit", exit_to_start)],
+    fallbacks=[CommandHandler("exit", lambda update, context: update.message.reply_text("취소되었습니다.", reply_markup=get_main_menu_keyboard()))],
 )
 
 rate_handler = ConversationHandler(
     entry_points=[CommandHandler("rate", rate_user)],
     states={
-        WAITING_FOR_CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_rating)],
+        WAITING_FOR_CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_rating)]
     },
-    fallbacks=[CommandHandler("exit", exit_to_start)],
+    fallbacks=[CommandHandler("exit", lambda update, context: update.message.reply_text("취소되었습니다.", reply_markup=get_main_menu_keyboard()))],
 )
 
 refund_handler = ConversationHandler(
     entry_points=[CommandHandler("refund", refund_request)],
     states={
-        WAITING_FOR_REFUND_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_refund)],
+        WAITING_FOR_REFUND_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_refund)]
     },
-    fallbacks=[CommandHandler("exit", exit_to_start)],
+    fallbacks=[CommandHandler("exit", lambda update, context: update.message.reply_text("취소되었습니다.", reply_markup=get_main_menu_keyboard()))],
 )
 
 # ==============================
@@ -961,12 +1003,15 @@ refund_handler = ConversationHandler(
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_API_KEY).build()
 
-    # 버튼 기반 메인 메뉴
+    # 메인 메뉴 관련 핸들러
+    app.add_handler(CommandHandler("start", show_main_menu))
     app.add_handler(CommandHandler("menu", show_main_menu))
     app.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^menu_"))
 
-    # 명령어 기반 핸들러
-    app.add_handler(CommandHandler("start", start))
+    # 버튼 기반 대화 흐름 핸들러
+    app.add_handler(sell_handler)
+
+    # 기존 명령어 기반 핸들러 (버튼 메뉴와 함께 사용)
     app.add_handler(CommandHandler("list", list_items_command))
     app.add_handler(CommandHandler("next", next_page))
     app.add_handler(CommandHandler("prev", prev_page))
@@ -979,12 +1024,14 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("warexit", warexit_command))
     app.add_handler(CommandHandler("chat", start_chat))
     app.add_handler(CommandHandler("exit", exit_to_start))
-    app.add_handler(refund_handler)  # 대화형 refund 핸들러
+    app.add_handler(refund_handler)
 
-    # 대화형 핸들러 등록
-    app.add_handler(sell_handler)
+    # 대화형 핸들러 등록 (버튼 메뉴 선택 후 텍스트 입력 처리)
     app.add_handler(cancel_handler)
     app.add_handler(rate_handler)
+
+    # 텍스트 입력 핸들러 (버튼 메뉴 선택 후 필요한 입력 처리)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input_handler))
 
     # 파일 및 텍스트 메시지 중계 (채팅)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
