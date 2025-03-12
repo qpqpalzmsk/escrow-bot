@@ -37,6 +37,18 @@ NETWORK_FEE = 0.1        # 송금 시 네트워크 수수료 (USDT 단위)
 BANNED_USERS = set()     # /ban으로 차단된 사용자 ID 집합
 REGISTERED_USERS = set() # 봇과 대화한 사용자 ID 집합
 
+# 대화 상태 상수
+(WAITING_FOR_ITEM_NAME,
+ WAITING_FOR_PRICE,
+ WAITING_FOR_ITEM_TYPE,
+ WAITING_FOR_CANCEL_ID,
+ WAITING_FOR_RATING,
+ WAITING_FOR_CONFIRMATION,
+ WAITING_FOR_REFUND_WALLET) = range(7)
+
+ITEMS_PER_PAGE = 10
+active_chats = {}  # {거래ID: (buyer_id, seller_id)}
+
 # -------------------------------------------------------------------
 # 환경 변수 설정
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
@@ -66,7 +78,7 @@ engine = create_engine(
     pool_pre_ping=True,
 )
 SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
-Base = declarative_base()  # 경고가 나오더라도 사용 가능
+Base = declarative_base()  # sqlalchemy.orm.declarative_base() 권장
 
 def get_db_session():
     return SessionLocal()
@@ -112,7 +124,18 @@ NORMAL_COMMISSION_RATE = 0.05   # 5%
 OVERSEND_COMMISSION_RATE = 0.075 # 7.5%
 
 # -------------------------------------------------------------------
-# 송금 및 검증 함수들 (생략하지 않고 기존 코드 유지)
+# 관리자, 차단 사용자 체크용 데코레이터
+def check_banned(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: CallbackContext, *args, **kwargs):
+        if update.effective_user and update.effective_user.id in BANNED_USERS:
+            await update.message.reply_text("차단된 사용자입니다.")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+# -------------------------------------------------------------------
+# 송금 및 검증 함수들
 def verify_deposit(expected_amount: float, txid: str, internal_txid: str) -> (bool, float):
     try:
         tx = client.get_transaction(txid)
@@ -245,6 +268,7 @@ async def process_deposit_confirmation(session, tx: Transaction, deposited_amoun
                   "구매자가 /confirm 명령어를 입력하면 거래가 최종 완료됩니다.")
         )
 
+# -------------------------------------------------------------------
 # 자동 입금 확인 작업 (비동기)
 async def auto_verify_deposits(context: CallbackContext):
     logging.info("auto_verify_deposits: 시작")
@@ -275,38 +299,7 @@ async def auto_verify_deposits(context: CallbackContext):
         session.close()
 
 # -------------------------------------------------------------------
-# 대화 상태 상수
-(WAITING_FOR_ITEM_NAME,
- WAITING_FOR_PRICE,
- WAITING_FOR_ITEM_TYPE,
- WAITING_FOR_CANCEL_ID,
- WAITING_FOR_RATING,
- WAITING_FOR_CONFIRMATION,
- WAITING_FOR_REFUND_WALLET) = range(7)
-
-ITEMS_PER_PAGE = 10
-active_chats = {}  # {거래ID: (buyer_id, seller_id)}
-
-# -------------------------------------------------------------------
-# 관리자, 차단 사용자 체크용 데코레이터
-def check_banned(func):
-    @wraps(func)
-    async def wrapper(update: Update, context: CallbackContext, *args, **kwargs):
-        if update.effective_user and update.effective_user.id in BANNED_USERS:
-            await update.message.reply_text("차단된 사용자입니다.")
-            return
-        return await func(update, context, *args, **kwargs)
-    return wrapper
-
-# -------------------------------------------------------------------
-# 사용자 등록 함수 (봇과 대화한 사용자 기록)
-async def register_user(update: Update, context: CallbackContext) -> None:
-    if update.effective_user:
-        REGISTERED_USERS.add(update.effective_user.id)
-        logging.info(f"register_user: 사용자 {update.effective_user.id} 등록됨")
-
-# -------------------------------------------------------------------
-# 명령어 안내 함수 (관리자 명령어는 숨김)
+# 명령어 안내 함수 (관리자 명령어는 숨김; /exit 포함)
 def command_guide() -> str:
     return (
         "\n\n사용 가능한 명령어:\n"
@@ -327,18 +320,30 @@ def command_guide() -> str:
     )
 
 # -------------------------------------------------------------------
-# 오류 핸들러
-async def error_handler(update: object, context: CallbackContext) -> None:
-    logging.error(msg="Exception while handling an update:", exc_info=context.error)
-
-# -------------------------------------------------------------------
-# /exit: 대화 종료 및 초기화 (전역 명령어)
+# 글로벌 /exit 명령어 핸들러  
+# 단, 대화 진행 중(in_conversation 플래그가 있으면 사용 불가)
 @check_banned
 async def exit_to_start(update: Update, context: CallbackContext) -> int:
+    if context.user_data.get("in_conversation"):
+        await update.message.reply_text("현재 거래 진행 중에는 /exit를 사용할 수 없습니다. 거래를 완료하거나 취소해주세요.")
+        return  # 아무것도 리턴하지 않음
     logging.info("exit_to_start triggered")
     context.user_data.clear()
-    await update.message.reply_text("대화가 취소되었습니다. 초기 화면으로 돌아갑니다.\n" + command_guide())
+    await update.message.reply_text("대화가 초기화되었습니다.\n" + command_guide())
     return ConversationHandler.END
+
+# -------------------------------------------------------------------
+# 각 대화 흐름 진입 시 in_conversation 플래그 설정 및 종료 시 제거
+def set_in_conversation(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: CallbackContext, *args, **kwargs):
+        context.user_data["in_conversation"] = True
+        result = await func(update, context, *args, **kwargs)
+        # 정상 종료 시 플래그 제거 (ConversationHandler.END가 리턴되면)
+        if result == ConversationHandler.END:
+            context.user_data.pop("in_conversation", None)
+        return result
+    return wrapper
 
 # -------------------------------------------------------------------
 # /start
@@ -353,9 +358,10 @@ async def start_command(update: Update, context: CallbackContext) -> int:
 # -------------------------------------------------------------------
 # /sell 대화 흐름
 @check_banned
+@set_in_conversation
 async def sell_command(update: Update, context: CallbackContext) -> int:
     logging.info("sell_command triggered")
-    await update.message.reply_text("판매할 상품의 이름을 입력해주세요.\n(취소: /exit)" + command_guide())
+    await update.message.reply_text("판매할 상품의 이름을 입력해주세요.\n(취소: /exit 사용 불가)" + command_guide())
     return WAITING_FOR_ITEM_NAME
 
 @check_banned
@@ -363,7 +369,7 @@ async def set_item_name(update: Update, context: CallbackContext) -> int:
     if update.message.text.strip().lower() in ["/exit", "exit"]:
         return await exit_to_start(update, context)
     context.user_data["item_name"] = update.message.text.strip()
-    await update.message.reply_text("상품의 가격(USDT)을 숫자로 입력해주세요.\n(취소: /exit)" + command_guide())
+    await update.message.reply_text("상품의 가격(USDT)을 숫자로 입력해주세요.\n(취소: /exit 사용 불가)" + command_guide())
     return WAITING_FOR_PRICE
 
 @check_banned
@@ -373,10 +379,10 @@ async def set_item_price(update: Update, context: CallbackContext) -> int:
     try:
         price = float(update.message.text.strip())
         context.user_data["price"] = price
-        await update.message.reply_text("상품 종류를 입력해주세요. (디지털/현물)\n(취소: /exit)" + command_guide())
+        await update.message.reply_text("상품 종류를 입력해주세요. (디지털/현물)\n(취소: /exit 사용 불가)" + command_guide())
         return WAITING_FOR_ITEM_TYPE
     except ValueError:
-        await update.message.reply_text("유효한 가격을 숫자로 입력해주세요.\n(취소: /exit)" + command_guide())
+        await update.message.reply_text("유효한 가격을 숫자로 입력해주세요.\n(취소: /exit 사용 불가)" + command_guide())
         return WAITING_FOR_PRICE
 
 @check_banned
@@ -385,7 +391,7 @@ async def set_item_type(update: Update, context: CallbackContext) -> int:
         return await exit_to_start(update, context)
     item_type = update.message.text.strip().lower()
     if item_type not in ["디지털", "현물"]:
-        await update.message.reply_text("유효한 종류를 입력해주세요. (디지털/현물)\n(취소: /exit)" + command_guide())
+        await update.message.reply_text("유효한 종류를 입력해주세요. (디지털/현물)\n(취소: /exit 사용 불가)" + command_guide())
         return WAITING_FOR_ITEM_TYPE
     item_name = context.user_data["item_name"]
     price = context.user_data["price"]
@@ -407,8 +413,9 @@ async def set_item_type(update: Update, context: CallbackContext) -> int:
 # -------------------------------------------------------------------
 # /cancel 대화 흐름 (입금 전 상품 취소)
 @check_banned
+@set_in_conversation
 async def cancel(update: Update, context: CallbackContext) -> int:
-    await update.message.reply_text("취소할 상품을 선택해주세요.\n(취소: /exit)" + command_guide())
+    await update.message.reply_text("취소할 상품을 선택해주세요.\n(취소: /exit 사용 불가)" + command_guide())
     session = get_db_session()
     try:
         seller_id = update.message.from_user.id
@@ -430,7 +437,7 @@ async def cancel(update: Update, context: CallbackContext) -> int:
         msg = f"취소 가능한 상품 목록 (페이지 {page}/{total_pages}):\n"
         for idx, it in enumerate(page_items, start=1):
             msg += f"{idx}. {it.name} - {it.price} USDT ({it.type})\n"
-        msg += "\n/next 또는 /prev 로 페이지 이동\n취소할 상품 번호/이름을 입력해주세요.\n(취소: /exit)"
+        msg += "\n/next 또는 /prev 로 페이지 이동\n취소할 상품 번호/이름을 입력해주세요.\n(취소: /exit 사용 불가)"
         await update.message.reply_text(msg + command_guide())
         return WAITING_FOR_CANCEL_ID
     except Exception as e:
@@ -785,6 +792,7 @@ async def off_transaction(update: Update, context: CallbackContext) -> None:
 # -------------------------------------------------------------------
 # /refund 대화 흐름 (구매자 전용; 오버송금된 경우)
 @check_banned
+@set_in_conversation
 async def refund_request(update: Update, context: CallbackContext) -> int:
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -809,7 +817,7 @@ async def refund_request(update: Update, context: CallbackContext) -> int:
         context.user_data["refund_txid"] = t_id
         context.user_data["refund_amount"] = refund_amount
         await update.message.reply_text(
-            f"환불을 진행합니다. 구매자 지갑 주소를 입력해주세요.\n(환불 금액: {refund_amount} USDT, 수수료 2.5% 적용)\n(취소: /exit)" + command_guide()
+            f"환불을 진행합니다. 구매자 지갑 주소를 입력해주세요.\n(환불 금액: {refund_amount} USDT, 수수료 2.5% 적용)\n(취소: /exit 사용 불가)" + command_guide()
         )
         return WAITING_FOR_REFUND_WALLET
     except Exception as e:
@@ -839,7 +847,7 @@ async def process_refund(update: Update, context: CallbackContext) -> int:
 
 # -------------------------------------------------------------------
 # 관리자 전용 명령어
-# /warexit (관리자 강제 종료)
+@check_banned
 async def warexit_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다." + command_guide())
@@ -867,7 +875,7 @@ async def warexit_command(update: Update, context: CallbackContext) -> None:
     finally:
         session.close()
 
-# /adminsearch: 거래ID로 구매자와 판매자 Telegram ID 조회
+@check_banned
 async def adminsearch_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다.")
@@ -892,7 +900,7 @@ async def adminsearch_command(update: Update, context: CallbackContext) -> None:
     finally:
         session.close()
 
-# /ban: 텔레그램 ID 차단
+@check_banned
 async def ban_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다.")
@@ -909,7 +917,7 @@ async def ban_command(update: Update, context: CallbackContext) -> None:
     BANNED_USERS.add(ban_id)
     await update.message.reply_text(f"텔레그램 ID {ban_id}를 차단했습니다.")
 
-# /unban: 차단 해제
+@check_banned
 async def unban_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다.")
@@ -929,7 +937,7 @@ async def unban_command(update: Update, context: CallbackContext) -> None:
     else:
         await update.message.reply_text("해당 텔레그램 ID는 차단 목록에 없습니다.")
 
-# /post: 관리자 메시지 전송
+@check_banned
 async def post_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다.")
@@ -951,40 +959,57 @@ async def post_command(update: Update, context: CallbackContext) -> None:
     await update.message.reply_text(f"공지 전송 완료 ({sent_count}명에게 전송).")
 
 # -------------------------------------------------------------------
-# 대화형 핸들러 설정
-sell_handler = ConversationHandler(
-    entry_points=[CommandHandler("sell", sell_command)],
-    states={
-        WAITING_FOR_ITEM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_name)],
-        WAITING_FOR_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_price)],
-        WAITING_FOR_ITEM_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_type)],
-    },
-    fallbacks=[CommandHandler("exit", exit_to_start)]
-)
+# /chat 대화 흐름
+@check_banned
+async def start_chat(update: Update, context: CallbackContext) -> None:
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("사용법: /chat 거래ID\n예: /chat 123456789012" + command_guide())
+        return
+    t_id = args[1].strip()
+    session = get_db_session()
+    try:
+        tx = session.query(Transaction).filter_by(transaction_id=t_id).filter(
+            Transaction.status.in_(["accepted", "deposit_confirmed", "deposit_confirmed_over", "completed"])
+        ).first()
+        if not tx:
+            await update.message.reply_text("유효한 거래가 아니거나 아직 입금 확인되지 않은 거래입니다." + command_guide())
+            return
+        user_id = update.message.from_user.id
+        if user_id not in [tx.buyer_id, tx.seller_id]:
+            await update.message.reply_text("이 거래의 당사자가 아니므로 채팅을 시작할 수 없습니다." + command_guide())
+            return
+        active_chats[t_id] = (tx.buyer_id, tx.seller_id)
+        context.user_data["current_chat_tx"] = t_id
+        await update.message.reply_text("채팅을 시작합니다. 텍스트/파일(사진, 문서) 전송 시 상대방에게 전달됩니다." + command_guide())
+    except Exception as e:
+        logging.error(f"/chat 오류: {e}")
+        await update.message.reply_text("채팅 시작 중 오류가 발생했습니다." + command_guide())
+    finally:
+        session.close()
 
-cancel_handler = ConversationHandler(
-    entry_points=[CommandHandler("cancel", cancel)],
-    states={
-        WAITING_FOR_CANCEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, cancel_item)],
-    },
-    fallbacks=[CommandHandler("exit", exit_to_start)]
-)
-
-rate_handler = ConversationHandler(
-    entry_points=[CommandHandler("rate", rate_user)],
-    states={
-        WAITING_FOR_CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_rating)],
-    },
-    fallbacks=[CommandHandler("exit", exit_to_start)]
-)
-
-refund_handler = ConversationHandler(
-    entry_points=[CommandHandler("refund", refund_request)],
-    states={
-        WAITING_FOR_REFUND_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_refund)],
-    },
-    fallbacks=[CommandHandler("exit", exit_to_start)]
-)
+@check_banned
+async def relay_message(update: Update, context: CallbackContext) -> None:
+    t_id = context.user_data.get("current_chat_tx")
+    if not t_id or t_id not in active_chats:
+        return
+    buyer_id, seller_id = active_chats[t_id]
+    sender = update.message.from_user.id
+    partner = seller_id if sender == buyer_id else buyer_id if sender == seller_id else None
+    if not partner:
+        return
+    try:
+        if update.message.document:
+            file_id = update.message.document.file_id
+            file_name = update.message.document.file_name
+            await context.bot.send_document(chat_id=partner, document=file_id, caption=f"[파일] {file_name}")
+        elif update.message.photo:
+            photo = update.message.photo[-1]
+            await context.bot.send_photo(chat_id=partner, photo=photo.file_id, caption="[사진]")
+        else:
+            await context.bot.send_message(chat_id=partner, text=f"[채팅] {update.message.text}")
+    except Exception as e:
+        logging.error(f"채팅 메시지 전송 오류: {e}")
 
 # -------------------------------------------------------------------
 # 메인 실행부
@@ -1006,7 +1031,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("checkdeposit", check_deposit))
     app.add_handler(CommandHandler("confirm", confirm_payment))
     app.add_handler(CommandHandler("off", off_transaction))
-    # 관리자 전용 명령어 (일반 안내에는 노출되지 않음)
+    # 관리자 전용 명령어
     app.add_handler(CommandHandler("warexit", warexit_command))
     app.add_handler(CommandHandler("adminsearch", adminsearch_command))
     app.add_handler(CommandHandler("ban", ban_command))
