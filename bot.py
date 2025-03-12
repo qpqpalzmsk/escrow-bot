@@ -112,7 +112,7 @@ NORMAL_COMMISSION_RATE = 0.05   # 5%
 OVERSEND_COMMISSION_RATE = 0.075 # 7.5%
 
 # -------------------------------------------------------------------
-# 송금 및 검증 함수들
+# 송금 및 검증 함수들 (생략하지 않고 기존 코드 유지)
 def verify_deposit(expected_amount: float, txid: str, internal_txid: str) -> (bool, float):
     try:
         tx = client.get_transaction(txid)
@@ -332,6 +332,15 @@ async def error_handler(update: object, context: CallbackContext) -> None:
     logging.error(msg="Exception while handling an update:", exc_info=context.error)
 
 # -------------------------------------------------------------------
+# /exit: 대화 종료 및 초기화 (전역 명령어)
+@check_banned
+async def exit_to_start(update: Update, context: CallbackContext) -> int:
+    logging.info("exit_to_start triggered")
+    context.user_data.clear()
+    await update.message.reply_text("대화가 취소되었습니다. 초기 화면으로 돌아갑니다.\n" + command_guide())
+    return ConversationHandler.END
+
+# -------------------------------------------------------------------
 # /start
 @check_banned
 async def start_command(update: Update, context: CallbackContext) -> int:
@@ -394,165 +403,6 @@ async def set_item_type(update: Update, context: CallbackContext) -> int:
     finally:
         session.close()
     return ConversationHandler.END
-
-# -------------------------------------------------------------------
-# /exit 처리 함수 (모든 대화에서 사용)
-@check_banned
-async def exit_to_start(update: Update, context: CallbackContext) -> int:
-    context.user_data.clear()
-    await update.message.reply_text("대화가 취소되었습니다. 초기 화면으로 돌아갑니다.\n" + command_guide())
-    return ConversationHandler.END
-
-# -------------------------------------------------------------------
-# /list, /next, /prev
-@check_banned
-async def list_items_command(update: Update, context: CallbackContext) -> None:
-    session = get_db_session()
-    try:
-        page = context.user_data.get("list_page", 1)
-        items = session.query(Item).filter(Item.status == "available").all()
-        if not items:
-            await update.message.reply_text("등록된 상품이 없습니다." + command_guide())
-            return
-        total_pages = (len(items) - 1) // ITEMS_PER_PAGE + 1
-        if page < 1:
-            page = total_pages
-        elif page > total_pages:
-            page = 1
-        context.user_data["list_page"] = page
-        start = (page - 1) * ITEMS_PER_PAGE
-        end = start + ITEMS_PER_PAGE
-        page_items = items[start:end]
-        context.user_data["list_mapping"] = {str(idx): item.id for idx, item in enumerate(page_items, start=1)}
-        msg = f"구매 가능한 상품 목록 (페이지 {page}/{total_pages}):\n"
-        for idx, item in enumerate(page_items, start=1):
-            msg += f"{idx}. {item.name} - {item.price} USDT ({item.type})\n"
-        msg += "\n/next, /prev 로 페이지 이동\n/offer [번호 또는 이름] 으로 거래 요청"
-        await update.message.reply_text(msg + command_guide())
-    except Exception as e:
-        logging.error(f"/list 오류: {e}")
-        await update.message.reply_text("상품 목록 조회 중 오류가 발생했습니다." + command_guide())
-    finally:
-        session.close()
-
-@check_banned
-async def next_page(update: Update, context: CallbackContext) -> None:
-    context.user_data["list_page"] = context.user_data.get("list_page", 1) + 1
-    await list_items_command(update, context)
-
-@check_banned
-async def prev_page(update: Update, context: CallbackContext) -> None:
-    context.user_data["list_page"] = context.user_data.get("list_page", 1) - 1
-    await list_items_command(update, context)
-
-# -------------------------------------------------------------------
-# /search 대화 흐름
-@check_banned
-async def search_items_command(update: Update, context: CallbackContext) -> None:
-    args = update.message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await update.message.reply_text("검색어를 입력해주세요. 예: /search 마우스" + command_guide())
-        return
-    query = args[1].strip().lower()
-    context.user_data["search_query"] = query
-    context.user_data["search_page"] = 1
-    await list_search_results(update, context)
-
-@check_banned
-async def list_search_results(update: Update, context: CallbackContext) -> None:
-    session = get_db_session()
-    try:
-        query = context.user_data.get("search_query", "")
-        page = context.user_data.get("search_page", 1)
-        items = session.query(Item).filter(Item.name.ilike(f"%{query}%"), Item.status == "available").all()
-        if not items:
-            await update.message.reply_text(f"'{query}' 검색 결과가 없습니다." + command_guide())
-            return
-        total_pages = (len(items) - 1) // ITEMS_PER_PAGE + 1
-        if page < 1:
-            page = total_pages
-        elif page > total_pages:
-            page = 1
-        context.user_data["search_page"] = page
-        start = (page - 1) * ITEMS_PER_PAGE
-        end = start + ITEMS_PER_PAGE
-        page_items = items[start:end]
-        context.user_data["search_mapping"] = {str(idx): item.id for idx, item in enumerate(page_items, start=1)}
-        msg = f"'{query}' 검색 결과 (페이지 {page}/{total_pages}):\n"
-        for idx, item in enumerate(page_items, start=1):
-            msg += f"{idx}. {item.name} - {item.price} USDT ({item.type})\n"
-        msg += "\n/next, /prev 로 페이지 이동\n/offer [번호 또는 이름] 으로 거래 요청"
-        await update.message.reply_text(msg + command_guide())
-    except Exception as e:
-        logging.error(f"/search 오류: {e}")
-        await update.message.reply_text("상품 검색 중 오류가 발생했습니다." + command_guide())
-    finally:
-        session.close()
-
-# -------------------------------------------------------------------
-# /offer 대화 흐름
-def generate_transaction_id() -> str:
-    return ''.join(str(random.randint(0, 9)) for _ in range(12))
-
-@check_banned
-async def offer_item(update: Update, context: CallbackContext) -> None:
-    session = get_db_session()
-    try:
-        args = update.message.text.split(maxsplit=1)
-        if len(args) < 2:
-            await update.message.reply_text("사용법: /offer [번호 또는 상품이름]" + command_guide())
-            return
-        identifier = args[1].strip()
-        mapping = context.user_data.get("list_mapping") or context.user_data.get("search_mapping") or {}
-        if identifier in mapping:
-            item_id = mapping[identifier]
-            item = session.query(Item).filter_by(id=item_id, status="available").first()
-        else:
-            try:
-                item = session.query(Item).filter(
-                    (Item.id == int(identifier)) | (Item.name.ilike(f"%{identifier}%")),
-                    Item.status == "available"
-                ).first()
-            except ValueError:
-                item = session.query(Item).filter(
-                    Item.name.ilike(f"%{identifier}%"),
-                    Item.status == "available"
-                ).first()
-        if not item:
-            await update.message.reply_text("유효한 상품 번호/이름을 입력해주세요." + command_guide())
-            return
-        buyer_id = update.message.from_user.id
-        seller_id = item.seller_id
-        t_id = generate_transaction_id()
-        new_tx = Transaction(
-            item_id=item.id,
-            buyer_id=buyer_id,
-            seller_id=seller_id,
-            amount=item.price,
-            transaction_id=t_id,
-        )
-        session.add(new_tx)
-        session.commit()
-        await update.message.reply_text(
-            f"상품 '{item.name}'에 대한 거래 요청이 생성되었습니다!\n거래 ID: {t_id}\n※ 송금 시 반드시 거래 ID를 확인용으로 입력해주세요." + command_guide()
-        )
-        try:
-            await context.bot.send_message(
-                chat_id=seller_id,
-                text=(
-                    f"당신의 상품 '{item.name}'에 거래 요청이 도착했습니다.\n거래 ID: {t_id}\n"
-                    "판매자께서는 /accept 거래ID 판매자지갑주소 로 수락하거나, /refusal 거래ID 로 거절해주세요.\n"
-                    "※ 네트워크: TRC20 USDT"
-                )
-            )
-        except Exception as e:
-            logging.error(f"판매자 알림 오류: {e}")
-    except Exception as e:
-        session.rollback()
-        logging.error(f"/offer 오류: {e}")
-        await update.message.reply_text("거래 요청 중 오류가 발생했습니다." + command_guide())
-    finally:
-        session.close()
 
 # -------------------------------------------------------------------
 # /cancel 대화 흐름 (입금 전 상품 취소)
