@@ -63,7 +63,7 @@ engine = create_engine(
     pool_pre_ping=True,
 )
 SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
-Base = declarative_base()
+Base = declarative_base()  # 경고가 나오더라도 사용 가능 (추후 sqlalchemy.orm.declarative_base() 사용 가능)
 
 def get_db_session():
     return SessionLocal()
@@ -312,7 +312,7 @@ def check_cancel(update: Update) -> bool:
 
 # -------------------------------------------------------------------
 # /start
-async def start_command(update: Update, _) -> int:
+async def start_command(update: Update, _: CallbackContext) -> int:
     await update.message.reply_text(
         "에스크로 거래 봇에 오신 것을 환영합니다!\n문제 발생 시 관리자에게 문의하세요.\n(관리자 ID는 봇 프로필에서 확인)" + command_guide()
     )
@@ -320,7 +320,7 @@ async def start_command(update: Update, _) -> int:
 
 # -------------------------------------------------------------------
 # /sell 대화 흐름
-async def sell_command(update: Update, _) -> int:
+async def sell_command(update: Update, _: CallbackContext) -> int:
     await update.message.reply_text("판매할 상품의 이름을 입력해주세요.\n(취소: /exit)" + command_guide())
     return WAITING_FOR_ITEM_NAME
 
@@ -492,8 +492,7 @@ async def offer_item(update: Update, context: CallbackContext) -> None:
         session.add(new_tx)
         session.commit()
         await update.message.reply_text(
-            f"상품 '{item.name}'에 대한 거래 요청이 생성되었습니다!\n거래 ID: {t_id}\n※ 송금 시 반드시 거래 ID를 확인용으로 입력해주세요."
-            + command_guide()
+            f"상품 '{item.name}'에 대한 거래 요청이 생성되었습니다!\n거래 ID: {t_id}\n※ 송금 시 반드시 거래 ID를 확인용으로 입력해주세요." + command_guide()
         )
         try:
             await context.bot.send_message(
@@ -883,7 +882,7 @@ async def off_transaction(update: Update, context: CallbackContext) -> None:
         session.close()
 
 # -------------------------------------------------------------------
-# /refund (구매자 전용; 오버송금된 경우)
+# /refund 대화 흐름 (구매자 전용; 오버송금된 경우)
 async def refund_request(update: Update, context: CallbackContext) -> int:
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -908,7 +907,7 @@ async def refund_request(update: Update, context: CallbackContext) -> int:
         context.user_data["refund_txid"] = t_id
         context.user_data["refund_amount"] = refund_amount
         await update.message.reply_text(
-            f"환불을 진행합니다. 구매자 지갑 주소를 입력해주세요.\n(환불 금액: {refund_amount} USDT, 수수료 2.5% 적용)" + command_guide()
+            f"환불을 진행합니다. 구매자 지갑 주소를 입력해주세요.\n(환불 금액: {refund_amount} USDT, 수수료 2.5% 적용)\n(취소: /exit)" + command_guide()
         )
         return WAITING_FOR_REFUND_WALLET
     except Exception as e:
@@ -927,8 +926,7 @@ async def process_refund(update: Update, context: CallbackContext) -> int:
     try:
         result = send_usdt(buyer_wallet, refund_amount, memo=t_id)
         await update.message.reply_text(
-            f"환불 요청이 완료되었습니다. {refund_amount} USDT가 {buyer_wallet}로 송금되었습니다.\n거래 ID: {t_id}\n송금 결과: {result}"
-            + command_guide()
+            f"환불 요청이 완료되었습니다. {refund_amount} USDT가 {buyer_wallet}로 송금되었습니다.\n거래 ID: {t_id}\n송금 결과: {result}" + command_guide()
         )
         return ConversationHandler.END
     except Exception as e:
@@ -966,62 +964,42 @@ async def warexit_command(update: Update, context: CallbackContext) -> None:
         session.close()
 
 # -------------------------------------------------------------------
-# /exit (대화 종료)
-async def exit_to_start_command(update: Update, context: CallbackContext) -> int:
-    return await exit_to_start(update, context)
+# 대화형 핸들러 설정
+from telegram.ext import filters
 
-# -------------------------------------------------------------------
-# /chat 대화 흐름
-active_chats = {}  # {거래ID: (buyer_id, seller_id)}
+sell_handler = ConversationHandler(
+    entry_points=[CommandHandler("sell", sell_command)],
+    states={
+        WAITING_FOR_ITEM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_name)],
+        WAITING_FOR_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_price)],
+        WAITING_FOR_ITEM_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_item_type)],
+    },
+    fallbacks=[CommandHandler("exit", exit_to_start)]
+)
 
-async def start_chat(update: Update, context: CallbackContext) -> None:
-    args = update.message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await update.message.reply_text("사용법: /chat 거래ID\n예: /chat 123456789012" + command_guide())
-        return
-    t_id = args[1].strip()
-    session = get_db_session()
-    try:
-        tx = session.query(Transaction).filter_by(transaction_id=t_id).filter(
-            Transaction.status.in_(["accepted", "deposit_confirmed", "deposit_confirmed_over", "completed"])
-        ).first()
-        if not tx:
-            await update.message.reply_text("유효한 거래가 아니거나 아직 입금 확인되지 않은 거래입니다." + command_guide())
-            return
-        user_id = update.message.from_user.id
-        if user_id not in [tx.buyer_id, tx.seller_id]:
-            await update.message.reply_text("이 거래의 당사자가 아니므로 채팅을 시작할 수 없습니다." + command_guide())
-            return
-        active_chats[t_id] = (tx.buyer_id, tx.seller_id)
-        context.user_data["current_chat_tx"] = t_id
-        await update.message.reply_text("채팅을 시작합니다. 텍스트/파일(사진, 문서) 전송 시 상대방에게 전달됩니다." + command_guide())
-    except Exception as e:
-        logging.error(f"/chat 오류: {e}")
-        await update.message.reply_text("채팅 시작 중 오류가 발생했습니다." + command_guide())
-    finally:
-        session.close()
+cancel_handler = ConversationHandler(
+    entry_points=[CommandHandler("cancel", cancel)],
+    states={
+        WAITING_FOR_CANCEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, cancel_item)],
+    },
+    fallbacks=[CommandHandler("exit", exit_to_start)]
+)
 
-async def relay_message(update: Update, context: CallbackContext) -> None:
-    t_id = context.user_data.get("current_chat_tx")
-    if not t_id or t_id not in active_chats:
-        return
-    buyer_id, seller_id = active_chats[t_id]
-    sender = update.message.from_user.id
-    partner = seller_id if sender == buyer_id else buyer_id if sender == seller_id else None
-    if not partner:
-        return
-    try:
-        if update.message.document:
-            file_id = update.message.document.file_id
-            file_name = update.message.document.file_name
-            await context.bot.send_document(chat_id=partner, document=file_id, caption=f"[파일] {file_name}")
-        elif update.message.photo:
-            photo = update.message.photo[-1]
-            await context.bot.send_photo(chat_id=partner, photo=photo.file_id, caption="[사진]")
-        else:
-            await context.bot.send_message(chat_id=partner, text=f"[채팅] {update.message.text}")
-    except Exception as e:
-        logging.error(f"채팅 메시지 전송 오류: {e}")
+rate_handler = ConversationHandler(
+    entry_points=[CommandHandler("rate", rate_user)],
+    states={
+        WAITING_FOR_CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_rating)],
+    },
+    fallbacks=[CommandHandler("exit", exit_to_start)]
+)
+
+refund_handler = ConversationHandler(
+    entry_points=[CommandHandler("refund", refund_request)],
+    states={
+        WAITING_FOR_REFUND_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_refund)],
+    },
+    fallbacks=[CommandHandler("exit", exit_to_start)]
+)
 
 # -------------------------------------------------------------------
 # 메인 실행부
@@ -1042,7 +1020,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("off", off_transaction))
     app.add_handler(CommandHandler("warexit", warexit_command))
     app.add_handler(CommandHandler("chat", start_chat))
-    app.add_handler(CommandHandler("exit", exit_to_start_command))
+    app.add_handler(CommandHandler("exit", exit_to_start))
     app.add_handler(refund_handler)
 
     # ConversationHandlers 등록
