@@ -1141,10 +1141,10 @@ refund_handler = ConversationHandler(
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_API_KEY).build()
 
-    # 사용자 등록: 모든 메시지 수신 시 사용자를 기록합니다.
-    app.add_handler(MessageHandler(filters.ALL, register_user), group=0)
+    # 사용자 등록 핸들러는 그룹 1에 등록 (명령어 핸들러보다 늦게 처리)
+    app.add_handler(MessageHandler(filters.ALL, register_user), group=1)
 
-    # 주요 명령어 등록
+    # 주요 명령어 등록 (기본 그룹 0)
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("list", list_items_command))
     app.add_handler(CommandHandler("next", next_page))
