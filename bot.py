@@ -120,8 +120,8 @@ OVERSEND_COMMISSION_RATE = 0.075    # 7.5% (초과 송금 시)
 # 송금 및 검증 로직
 def verify_deposit(expected_amount: float, txid: str, internal_txid: str) -> (bool, float):
     """
-    기존 방식: 블록체인에서 txid를 조회하여, 송금 금액과 메모(거래 ID)가 정확한지 검증.
-    (메모 기반 검증 – 거래소 지갑에는 적용하기 어려울 수 있음)
+    기존 방식: 블록체인에서 txid를 조회해, 송금 금액과 메모(거래 ID)가 정확한지 검증합니다.
+    (메모 기반 – 거래소 지갑은 적용이 어려울 수 있음)
     """
     try:
         tx = client.get_transaction(txid)
@@ -130,7 +130,6 @@ def verify_deposit(expected_amount: float, txid: str, internal_txid: str) -> (bo
         data_hex = contract_info.get("data", "")
         memo = bytes.fromhex(data_hex).decode("utf-8") if data_hex else ""
         actual_amount = transferred_amount / 1e6
-
         if transferred_amount != int(expected_amount * 1e6):
             return (False, actual_amount)
         if internal_txid.lower() not in memo.lower():
@@ -142,8 +141,8 @@ def verify_deposit(expected_amount: float, txid: str, internal_txid: str) -> (bo
 
 def verify_deposit_txid(expected_amount: float, txid: str) -> (bool, float):
     """
-    새로운 방식: 메모 없이 txid만으로 입금 확인.
-    이미 사용된 txid는 중복으로 사용하지 못하도록 방지합니다.
+    새 방식: 메모 없이 txid만으로 입금 확인.
+    이미 사용된 txid는 중복 사용을 방지합니다.
     """
     try:
         if txid in USED_TXIDS:
@@ -199,7 +198,7 @@ def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
         raise
 
 # ─────────────────────────────────────────────
-# 자동 입금 확인 기능 (기존 방식은 메모 기반이지만, 새로 /checkdeposit 명령어로 txid 확인 방식을 사용할 예정)
+# 자동 입금 확인 기능 (기존 메모 기반 + /checkdeposit용 txid 방식)
 def fetch_recent_trc20_transactions(address: str, limit: int = 50) -> list:
     """
     TronGrid API를 사용해 봇 지갑의 최근 TRC20 USDT 트랜잭션을 조회합니다.
@@ -269,8 +268,8 @@ def process_deposit_confirmation(session, tx: Transaction, deposited_amount: flo
         session.commit()
         context.bot.send_message(
             chat_id=tx.buyer_id,
-            text=("입금이 확인되었습니다.\n판매자님, 구매자님께 물품을 발송해 주세요.\n"
-                  "물품 발송 후 구매자께서 /confirm 명령어를 입력하면 거래가 최종 완료됩니다.")
+            text=("입금이 확인되었습니다.\n판매자님, 구매자에게 물품을 발송해 주세요.\n"
+                  "물품 발송 후 구매자께서는 /confirm 명령어를 입력하여 최종 거래를 완료해 주세요.")
         )
         context.bot.send_message(
             chat_id=tx.seller_id,
@@ -278,50 +277,37 @@ def process_deposit_confirmation(session, tx: Transaction, deposited_amount: flo
                   "구매자가 /confirm 명령어를 입력하면 거래가 최종 완료됩니다.")
         )
 
-# ─────────────────────────────────────────────
-# 새로 추가: /checkdeposit 명령어 – 메모 없이 txid로 입금 확인
-async def check_deposit(update: Update, context: CallbackContext) -> None:
-    args = update.message.text.split()
-    if len(args) < 3:
-        await update.message.reply_text("사용법: /checkdeposit 거래ID txid\n예: /checkdeposit 123456789012 abcdef1234567890" + command_guide())
-        return
-    t_id = args[1].strip()
-    txid = args[2].strip()
+def auto_verify_deposits(context: CallbackContext):
+    """
+    주기적으로 'accepted' 상태의 거래에 대해 봇 지갑의 최근 TRC20 입금을 확인하여,
+    입금이 확인되면 process_deposit_confirmation()을 호출합니다.
+    (메모 기반 확인)
+    """
     session = get_db_session()
     try:
-        tx = session.query(Transaction).filter_by(transaction_id=t_id, status="accepted").first()
-        if not tx:
-            await update.message.reply_text("유효한 거래가 아니거나 아직 수락되지 않은 거래입니다." + command_guide())
+        accepted_txs = session.query(Transaction).filter_by(status="accepted").all()
+        if not accepted_txs:
             return
-        # 검증: 메모 없이 txid로 확인 – 이미 사용된 txid는 방지
-        valid, deposited_amount = verify_deposit_txid(float(tx.amount), txid)
-        if not valid:
-            await update.message.reply_text("입금 내역을 확인할 수 없거나, 금액이 일치하지 않습니다. txid를 다시 확인해주세요." + command_guide())
-            return
-        # txid 사용 처리
-        USED_TXIDS.add(txid)
-        # 상태 업데이트
-        tx.status = "deposit_confirmed"
-        session.commit()
-        await update.message.reply_text("입금이 확인되었습니다. 판매자와 구매자 모두에게 안내 메시지를 전송합니다." + command_guide())
-        context.bot.send_message(
-            chat_id=tx.buyer_id,
-            text=("입금이 확인되었습니다.\n판매자님께서는 구매자님께 물품을 발송해 주세요.\n"
-                  "물품 발송 후 구매자께서는 /confirm 명령어를 입력하여 거래를 완료해 주세요.")
-        )
-        context.bot.send_message(
-            chat_id=tx.seller_id,
-            text=("입금이 확인되었습니다.\n구매자에게 물품을 발송해 주시기 바랍니다.\n"
-                  "구매자가 /confirm 명령어를 입력하면 거래가 완료됩니다.")
-        )
+        recent_txs = fetch_recent_trc20_transactions(TRON_WALLET, limit=50)
+        parsed = {}
+        for tx_info in recent_txs:
+            tx_id = tx_info.get("transaction_id", "")
+            if not tx_id:
+                continue
+            amt, memo = parse_trc20_transaction(tx_info)
+            parsed[tx_id] = (amt, memo)
+        for tx in accepted_txs:
+            for tx_id, (amt, memo) in parsed.items():
+                if tx.transaction_id.lower() in memo.lower():
+                    if amt >= float(tx.amount):
+                        process_deposit_confirmation(session, tx, amt, context)
+                        break
     except Exception as e:
-        session.rollback()
-        logging.error(f"/checkdeposit 오류: {e}")
-        await update.message.reply_text("입금 확인 처리 중 오류가 발생했습니다." + command_guide())
+        logging.error(f"자동 입금 확인 오류: {e}")
     finally:
         session.close()
 
-# ─────────────────────────────────────────────
+# -------------------------------------------------------------------
 # 텔레그램 봇 대화 상태 상수
 (WAITING_FOR_ITEM_NAME,
  WAITING_FOR_PRICE,
@@ -419,12 +405,14 @@ async def list_items_command(update: Update, context) -> None:
         if not items:
             await update.message.reply_text("등록된 상품이 없습니다." + command_guide())
             return
+
         total_pages = (len(items) - 1) // ITEMS_PER_PAGE + 1
         if page < 1:
             page = total_pages
         elif page > total_pages:
             page = 1
         context.user_data["list_page"] = page
+
         start = (page - 1) * ITEMS_PER_PAGE
         end = start + ITEMS_PER_PAGE
         page_items = items[start:end]
@@ -469,12 +457,14 @@ async def list_search_results(update: Update, context) -> None:
         if not items:
             await update.message.reply_text(f"'{query}' 검색 결과가 없습니다." + command_guide())
             return
+
         total_pages = (len(items) - 1) // ITEMS_PER_PAGE + 1
         if page < 1:
             page = total_pages
         elif page > total_pages:
             page = 1
         context.user_data["search_page"] = page
+
         start = (page - 1) * ITEMS_PER_PAGE
         end = start + ITEMS_PER_PAGE
         page_items = items[start:end]
@@ -706,7 +696,7 @@ async def refusal_transaction(update: Update, context) -> None:
 
 # -------------------------------------------------------------------
 # /checkdeposit (구매자 전용)
-# 구매자가 송금 후 /checkdeposit 명령어로 거래ID와 txid를 입력하면 봇 지갑 내역에서 txid를 확인합니다.
+# 메모 없이 TXID만으로 입금 확인 (TXID는 한 번만 사용 가능)
 async def check_deposit(update: Update, context: CallbackContext) -> None:
     args = update.message.text.split()
     if len(args) < 3:
@@ -722,7 +712,7 @@ async def check_deposit(update: Update, context: CallbackContext) -> None:
             return
         valid, deposited_amount = verify_deposit_txid(float(tx.amount), txid)
         if not valid:
-            await update.message.reply_text("입금 내역을 확인할 수 없거나 금액이 일치하지 않습니다. txid를 다시 확인해주세요." + command_guide())
+            await update.message.reply_text("입금 내역을 확인할 수 없거나, 금액이 일치하지 않습니다. TXID를 다시 확인해주세요." + command_guide())
             return
         USED_TXIDS.add(txid)
         tx.status = "deposit_confirmed"
@@ -731,7 +721,7 @@ async def check_deposit(update: Update, context: CallbackContext) -> None:
         context.bot.send_message(
             chat_id=tx.buyer_id,
             text=("입금이 확인되었습니다.\n판매자께서는 구매자에게 물품을 발송해 주세요.\n"
-                  "물품 발송 후 구매자께서는 /confirm 명령어를 입력하여 최종 거래를 완료해 주세요.")
+                  "물품 발송 후, 구매자께서는 /confirm 명령어를 입력하여 최종 거래를 완료해 주세요.")
         )
         context.bot.send_message(
             chat_id=tx.seller_id,
@@ -747,7 +737,7 @@ async def check_deposit(update: Update, context: CallbackContext) -> None:
 
 # -------------------------------------------------------------------
 # /confirm (구매자 전용)
-# 구매자가 물품 수령 후 /confirm 명령어를 입력하면, 최종적으로 판매자에게 송금(수수료 및 네트워크 수수료 차감)이 진행됩니다.
+# 구매자가 물품 수령 후 /confirm 명령어를 입력하면 최종 송금(네트워크 수수료 및 중개 수수료 차감)이 진행됩니다.
 async def confirm_payment(update: Update, context) -> None:
     args = update.message.text.split()
     if len(args) < 4:
@@ -768,13 +758,13 @@ async def confirm_payment(update: Update, context) -> None:
             await update.message.reply_text("구매자만 이 명령어를 사용할 수 있습니다." + command_guide())
             return
 
-        # 최종 확인 시, txid 검증(이미 사용된 txid는 방지)
+        # 최종 확인 시 TXID 검증(이미 사용된 TXID는 방지)
         valid, _ = verify_deposit_txid(float(tx.amount), txid)
         if not valid:
-            await update.message.reply_text("txid를 다시 확인해주세요. (입금 내역 미확인)" + command_guide())
+            await update.message.reply_text("TXID를 다시 확인해주세요. (입금 내역 미확인)" + command_guide())
             return
 
-        # 최종 송금 전: 판매자에게 송금할 금액 계산 (네트워크 수수료 NETWORK_FEE 차감 후, 중개 수수료 적용)
+        # 네트워크 수수료 NETWORK_FEE를 차감한 후 중개 수수료 적용
         original_amount = float(tx.amount)
         if original_amount <= NETWORK_FEE:
             await update.message.reply_text("송금할 금액이 네트워크 수수료보다 적습니다. 관리자에게 문의하세요." + command_guide())
@@ -791,9 +781,11 @@ async def confirm_payment(update: Update, context) -> None:
             result = send_usdt(seller_wallet, net_amount, memo=t_id)
             await context.bot.send_message(
                 chat_id=tx.seller_id,
-                text=(f"거래 ID {t_id}가 최종 완료되었습니다.\n"
-                      f"{net_amount} USDT가 판매자 지갑({seller_wallet})으로 송금되었습니다.\n"
-                      f"송금 결과: {result}\n구매자님, 물품 수령 후 확인 부탁드립니다!")
+                text=(
+                    f"거래 ID {t_id}가 최종 완료되었습니다.\n"
+                    f"{net_amount} USDT가 판매자 지갑({seller_wallet})으로 송금되었습니다.\n"
+                    f"송금 결과: {result}\n구매자님, 물품 수령 후 확인 부탁드립니다!"
+                )
             )
         except Exception as e:
             logging.error(f"판매자 송금 오류: {e}")
@@ -942,7 +934,7 @@ async def off_transaction(update: Update, context) -> None:
         session.close()
 
 # -------------------------------------------------------------------
-# /refund (구매자 전용) – 오버송금된 경우에만 진행
+# /refund (구매자 전용, 오버송금된 경우에만 진행)
 async def refund_request(update: Update, context) -> int:
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -1093,7 +1085,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("offer", offer_item))
     app.add_handler(CommandHandler("accept", accept_transaction))
     app.add_handler(CommandHandler("refusal", refusal_transaction))
-    # 새로 추가: /checkdeposit – 구매자가 txid로 입금 확인
     app.add_handler(CommandHandler("checkdeposit", check_deposit))
     app.add_handler(CommandHandler("confirm", confirm_payment))
     app.add_handler(CommandHandler("off", off_transaction))
