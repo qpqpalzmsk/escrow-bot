@@ -32,10 +32,10 @@ logging.basicConfig(
 )
 
 # 전역 변수
-USED_TXIDS = set()  # 이미 사용된 TXID 기록 (중복 사용 방지)
-NETWORK_FEE = 0.1   # 송금 시 네트워크 수수료 (USDT 단위)
-BANNED_USERS = set()       # /ban으로 차단된 사용자 ID 집합
-REGISTERED_USERS = set()   # 봇과 대화한 사용자 ID 집합
+USED_TXIDS = set()       # 이미 사용된 TXID 기록 (중복 사용 방지)
+NETWORK_FEE = 0.1        # 송금 시 네트워크 수수료 (USDT 단위)
+BANNED_USERS = set()     # /ban으로 차단된 사용자 ID 집합
+REGISTERED_USERS = set() # 봇과 대화한 사용자 ID 집합
 
 # -------------------------------------------------------------------
 # 환경 변수 설정
@@ -204,11 +204,13 @@ def parse_trc20_transaction(tx_info: dict) -> (float, str):
         memo_str = ""
     return amount_float, memo_str
 
-def process_deposit_confirmation(session, tx: Transaction, deposited_amount: float, context: CallbackContext):
+# -------------------------------------------------------------------
+# 비동기 송금 처리 함수 (자동 입금 확인용)
+async def process_deposit_confirmation(session, tx: Transaction, deposited_amount: float, context: CallbackContext):
     original_amount = float(tx.amount)
     if deposited_amount < original_amount:
         refund_result = send_usdt(tx.buyer_id, deposited_amount, memo=tx.transaction_id)
-        context.bot.send_message(
+        await context.bot.send_message(
             chat_id=tx.buyer_id,
             text=(f"입금액 {deposited_amount} USDT가 부족합니다 (필요: {original_amount} USDT).\n"
                   f"전액 환불 처리되었습니다. 환불 결과: {refund_result}\n정확한 금액을 다시 송금해주세요.")
@@ -218,12 +220,12 @@ def process_deposit_confirmation(session, tx: Transaction, deposited_amount: flo
     elif deposited_amount > original_amount:
         tx.status = "deposit_confirmed_over"
         session.commit()
-        context.bot.send_message(
+        await context.bot.send_message(
             chat_id=tx.buyer_id,
             text=(f"입금액 {deposited_amount} USDT가 원래 금액 {original_amount} USDT보다 초과되었습니다.\n"
                   "초과 송금의 경우, /refund 명령어를 사용하여 환불 요청해 주세요.")
         )
-        context.bot.send_message(
+        await context.bot.send_message(
             chat_id=tx.seller_id,
             text=(f"입금액이 초과되었습니다 (입금액: {deposited_amount} USDT).\n구매자에게 초과 환불 절차를 안내해 주세요.\n"
                   "해당 거래는 진행되지 않습니다.")
@@ -231,18 +233,19 @@ def process_deposit_confirmation(session, tx: Transaction, deposited_amount: flo
     else:
         tx.status = "deposit_confirmed"
         session.commit()
-        context.bot.send_message(
+        await context.bot.send_message(
             chat_id=tx.buyer_id,
             text=("입금이 확인되었습니다.\n판매자님, 구매자에게 물품을 발송해 주세요.\n"
                   "물품 발송 후, 구매자께서는 /confirm 명령어를 입력하여 최종 거래를 완료해 주세요.")
         )
-        context.bot.send_message(
+        await context.bot.send_message(
             chat_id=tx.seller_id,
             text=("입금이 확인되었습니다.\n구매자에게 물품을 발송해 주시기 바랍니다.\n"
                   "구매자가 /confirm 명령어를 입력하면 거래가 최종 완료됩니다.")
         )
 
-def auto_verify_deposits(context: CallbackContext):
+# 자동 입금 확인 작업 (비동기)
+async def auto_verify_deposits(context: CallbackContext):
     session = get_db_session()
     try:
         accepted_txs = session.query(Transaction).filter_by(status="accepted").all()
@@ -260,7 +263,7 @@ def auto_verify_deposits(context: CallbackContext):
             for tx_id, (amt, memo) in parsed.items():
                 if tx.transaction_id.lower() in memo.lower():
                     if amt >= float(tx.amount):
-                        process_deposit_confirmation(session, tx, amt, context)
+                        await process_deposit_confirmation(session, tx, amt, context)
                         break
     except Exception as e:
         logging.error(f"자동 입금 확인 오류: {e}")
@@ -319,7 +322,7 @@ def command_guide() -> str:
     )
 
 # -------------------------------------------------------------------
-# 오류 핸들러 (없던 error_handler를 추가하여 예외 발생 시 로그 출력)
+# 오류 핸들러
 async def error_handler(update: object, context: CallbackContext) -> None:
     logging.error(msg="Exception while handling an update:", exc_info=context.error)
 
@@ -328,8 +331,7 @@ async def error_handler(update: object, context: CallbackContext) -> None:
 @check_banned
 async def start_command(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text(
-        "에스크로 거래 봇에 오신 것을 환영합니다!\n문제 발생 시 관리자에게 문의하세요."
-        + command_guide()
+        "에스크로 거래 봇에 오신 것을 환영합니다!\n문제 발생 시 관리자에게 문의하세요." + command_guide()
     )
     return ConversationHandler.END
 
@@ -714,12 +716,12 @@ async def check_deposit(update: Update, context: CallbackContext) -> None:
         tx.status = "deposit_confirmed"
         session.commit()
         await update.message.reply_text("입금이 확인되었습니다. 판매자와 구매자에게 안내 메시지를 전송합니다." + command_guide())
-        context.bot.send_message(
+        await context.bot.send_message(
             chat_id=tx.buyer_id,
             text=("입금이 확인되었습니다.\n판매자께서는 구매자에게 물품을 발송해 주세요.\n"
                   "물품 발송 후, 구매자께서는 /confirm 명령어를 입력하여 최종 거래를 완료해 주세요.")
         )
-        context.bot.send_message(
+        await context.bot.send_message(
             chat_id=tx.seller_id,
             text=("입금이 확인되었습니다.\n구매자에게 물품을 발송해 주시기 바랍니다.\n"
                   "구매자가 /confirm 명령어를 입력하면 거래가 최종 완료됩니다.")
@@ -1050,6 +1052,26 @@ async def ban_command(update: Update, context: CallbackContext) -> None:
     BANNED_USERS.add(ban_id)
     await update.message.reply_text(f"텔레그램 ID {ban_id}를 차단했습니다.")
 
+# /unban: 텔레그램 ID를 입력하면 해당 사용자의 차단을 해제
+async def unban_command(update: Update, context: CallbackContext) -> None:
+    if update.message.from_user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다.")
+        return
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("사용법: /unban 텔레그램ID")
+        return
+    try:
+        unban_id = int(args[1].strip())
+    except ValueError:
+        await update.message.reply_text("유효한 텔레그램 ID를 입력해주세요.")
+        return
+    if unban_id in BANNED_USERS:
+        BANNED_USERS.remove(unban_id)
+        await update.message.reply_text(f"텔레그램 ID {unban_id}의 차단을 해제했습니다.")
+    else:
+        await update.message.reply_text("해당 텔레그램 ID는 차단 목록에 없습니다.")
+
 # /post: 관리자 메시지를 봇과 대화한 사용자 및 봇을 추가한 사용자들에게 전송
 async def post_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
@@ -1132,6 +1154,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("warexit", warexit_command))
     app.add_handler(CommandHandler("adminsearch", adminsearch_command))
     app.add_handler(CommandHandler("ban", ban_command))
+    app.add_handler(CommandHandler("unban", unban_command))
     app.add_handler(CommandHandler("post", post_command))
     app.add_handler(CommandHandler("chat", start_chat))
     app.add_handler(CommandHandler("exit", exit_to_start))
