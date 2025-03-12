@@ -208,7 +208,7 @@ def parse_trc20_transaction(tx_info: dict) -> (float, str):
 # 비동기 송금 처리 함수 (자동 입금 확인용)
 async def process_deposit_confirmation(session, tx: Transaction, deposited_amount: float, context: CallbackContext):
     original_amount = float(tx.amount)
-    logging.info(f"process_deposit_confirmation: tx {tx.transaction_id} deposited {deposited_amount} (expected {original_amount})")
+    logging.info(f"process_deposit_confirmation: 거래ID {tx.transaction_id} - 입금액 {deposited_amount} (필요: {original_amount})")
     if deposited_amount < original_amount:
         refund_result = send_usdt(tx.buyer_id, deposited_amount, memo=tx.transaction_id)
         await context.bot.send_message(
@@ -303,7 +303,7 @@ def check_banned(func):
 async def register_user(update: Update, context: CallbackContext) -> None:
     if update.effective_user:
         REGISTERED_USERS.add(update.effective_user.id)
-        logging.info(f"register_user: {update.effective_user.id}")
+        logging.info(f"register_user: 사용자 {update.effective_user.id} 등록됨")
 
 # -------------------------------------------------------------------
 # 명령어 안내 함수 (관리자 명령어는 숨김)
@@ -989,7 +989,7 @@ async def process_refund(update: Update, context: CallbackContext) -> int:
 
 # -------------------------------------------------------------------
 # 관리자 전용 명령어
-# /warexit (기존 관리자 강제 종료)
+# /warexit (관리자 강제 종료)
 async def warexit_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다." + command_guide())
@@ -1017,7 +1017,7 @@ async def warexit_command(update: Update, context: CallbackContext) -> None:
     finally:
         session.close()
 
-# /adminsearch: 거래ID를 입력하면 해당 거래의 구매자와 판매자 Telegram ID 조회
+# /adminsearch: 거래ID로 구매자와 판매자 Telegram ID 조회
 async def adminsearch_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다.")
@@ -1042,7 +1042,7 @@ async def adminsearch_command(update: Update, context: CallbackContext) -> None:
     finally:
         session.close()
 
-# /ban: 텔레그램 ID를 입력하면 해당 사용자를 차단
+# /ban: 텔레그램 ID 차단
 async def ban_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다.")
@@ -1059,7 +1059,7 @@ async def ban_command(update: Update, context: CallbackContext) -> None:
     BANNED_USERS.add(ban_id)
     await update.message.reply_text(f"텔레그램 ID {ban_id}를 차단했습니다.")
 
-# /unban: 텔레그램 ID를 입력하면 해당 사용자의 차단을 해제
+# /unban: 차단 해제
 async def unban_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다.")
@@ -1079,7 +1079,7 @@ async def unban_command(update: Update, context: CallbackContext) -> None:
     else:
         await update.message.reply_text("해당 텔레그램 ID는 차단 목록에 없습니다.")
 
-# /post: 관리자 메시지를 봇과 대화한 사용자 및 봇을 추가한 사용자들에게 전송
+# /post: 관리자 메시지 전송
 async def post_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다.")
