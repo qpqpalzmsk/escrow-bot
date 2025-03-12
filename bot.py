@@ -208,6 +208,7 @@ def parse_trc20_transaction(tx_info: dict) -> (float, str):
 # 비동기 송금 처리 함수 (자동 입금 확인용)
 async def process_deposit_confirmation(session, tx: Transaction, deposited_amount: float, context: CallbackContext):
     original_amount = float(tx.amount)
+    logging.info(f"process_deposit_confirmation: tx {tx.transaction_id} deposited {deposited_amount} (expected {original_amount})")
     if deposited_amount < original_amount:
         refund_result = send_usdt(tx.buyer_id, deposited_amount, memo=tx.transaction_id)
         await context.bot.send_message(
@@ -246,9 +247,11 @@ async def process_deposit_confirmation(session, tx: Transaction, deposited_amoun
 
 # 자동 입금 확인 작업 (비동기)
 async def auto_verify_deposits(context: CallbackContext):
+    logging.info("auto_verify_deposits: 시작")
     session = get_db_session()
     try:
         accepted_txs = session.query(Transaction).filter_by(status="accepted").all()
+        logging.info(f"auto_verify_deposits: {len(accepted_txs)} accepted transactions")
         if not accepted_txs:
             return
         recent_txs = fetch_recent_trc20_transactions(TRON_WALLET, limit=50)
@@ -263,6 +266,7 @@ async def auto_verify_deposits(context: CallbackContext):
             for tx_id, (amt, memo) in parsed.items():
                 if tx.transaction_id.lower() in memo.lower():
                     if amt >= float(tx.amount):
+                        logging.info(f"auto_verify_deposits: 확인된 거래 {tx.transaction_id}")
                         await process_deposit_confirmation(session, tx, amt, context)
                         break
     except Exception as e:
@@ -299,6 +303,7 @@ def check_banned(func):
 async def register_user(update: Update, context: CallbackContext) -> None:
     if update.effective_user:
         REGISTERED_USERS.add(update.effective_user.id)
+        logging.info(f"register_user: {update.effective_user.id}")
 
 # -------------------------------------------------------------------
 # 명령어 안내 함수 (관리자 명령어는 숨김)
@@ -330,6 +335,7 @@ async def error_handler(update: object, context: CallbackContext) -> None:
 # /start
 @check_banned
 async def start_command(update: Update, context: CallbackContext) -> int:
+    logging.info("start_command triggered")
     await update.message.reply_text(
         "에스크로 거래 봇에 오신 것을 환영합니다!\n문제 발생 시 관리자에게 문의하세요." + command_guide()
     )
@@ -339,6 +345,7 @@ async def start_command(update: Update, context: CallbackContext) -> int:
 # /sell 대화 흐름
 @check_banned
 async def sell_command(update: Update, context: CallbackContext) -> int:
+    logging.info("sell_command triggered")
     await update.message.reply_text("판매할 상품의 이름을 입력해주세요.\n(취소: /exit)" + command_guide())
     return WAITING_FOR_ITEM_NAME
 
@@ -1082,7 +1089,6 @@ async def post_command(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text("사용법: /post 메시지내용")
         return
     post_message = args[1].strip()
-    # 전송 대상은 REGISTERED_USERS에 기록된 사용자 중 차단되지 않은 사용자들입니다.
     sent_count = 0
     for user_id in REGISTERED_USERS:
         if user_id in BANNED_USERS:
