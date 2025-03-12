@@ -228,75 +228,11 @@ def parse_trc20_transaction(tx_info: dict) -> (float, str):
     return amount_float, memo_str
 
 # -------------------------------------------------------------------
-# 비동기 송금 처리 함수 (자동 입금 확인용)
-async def process_deposit_confirmation(session, tx: Transaction, deposited_amount: float, context: CallbackContext):
-    original_amount = float(tx.amount)
-    logging.info(f"process_deposit_confirmation: 거래ID {tx.transaction_id} - 입금액 {deposited_amount} (필요: {original_amount})")
-    if deposited_amount < original_amount:
-        refund_result = send_usdt(tx.buyer_id, deposited_amount, memo=tx.transaction_id)
-        await context.bot.send_message(
-            chat_id=tx.buyer_id,
-            text=(f"입금액 {deposited_amount} USDT가 부족합니다 (필요: {original_amount} USDT).\n"
-                  f"전액 환불 처리되었습니다. 환불 결과: {refund_result}\n정확한 금액을 다시 송금해주세요.")
-        )
-        tx.status = "cancelled"
-        session.commit()
-    elif deposited_amount > original_amount:
-        tx.status = "deposit_confirmed_over"
-        session.commit()
-        await context.bot.send_message(
-            chat_id=tx.buyer_id,
-            text=(f"입금액 {deposited_amount} USDT가 원래 금액 {original_amount} USDT보다 초과되었습니다.\n"
-                  "초과 송금의 경우, /refund 명령어를 사용하여 환불 요청해 주세요.")
-        )
-        await context.bot.send_message(
-            chat_id=tx.seller_id,
-            text=(f"입금액이 초과되었습니다 (입금액: {deposited_amount} USDT).\n구매자에게 초과 환불 절차를 안내해 주세요.\n"
-                  "해당 거래는 진행되지 않습니다.")
-        )
-    else:
-        tx.status = "deposit_confirmed"
-        session.commit()
-        await context.bot.send_message(
-            chat_id=tx.buyer_id,
-            text=("입금이 확인되었습니다.\n판매자님, 구매자에게 물품을 발송해 주세요.\n"
-                  "물품 발송 후, 구매자께서는 /confirm 명령어를 입력하여 최종 거래를 완료해 주세요.")
-        )
-        await context.bot.send_message(
-            chat_id=tx.seller_id,
-            text=("입금이 확인되었습니다.\n구매자에게 물품을 발송해 주시기 바랍니다.\n"
-                  "구매자가 /confirm 명령어를 입력하면 거래가 최종 완료됩니다.")
-        )
-
-# -------------------------------------------------------------------
-# 자동 입금 확인 작업 (비동기)
-async def auto_verify_deposits(context: CallbackContext):
-    logging.info("auto_verify_deposits: 시작")
-    session = get_db_session()
-    try:
-        accepted_txs = session.query(Transaction).filter_by(status="accepted").all()
-        logging.info(f"auto_verify_deposits: {len(accepted_txs)} accepted transactions")
-        if not accepted_txs:
-            return
-        recent_txs = fetch_recent_trc20_transactions(TRON_WALLET, limit=50)
-        parsed = {}
-        for tx_info in recent_txs:
-            tx_id = tx_info.get("transaction_id", "")
-            if not tx_id:
-                continue
-            amt, memo = parse_trc20_transaction(tx_info)
-            parsed[tx_id] = (amt, memo)
-        for tx in accepted_txs:
-            for tx_id, (amt, memo) in parsed.items():
-                if tx.transaction_id.lower() in memo.lower():
-                    if amt >= float(tx.amount):
-                        logging.info(f"auto_verify_deposits: 확인된 거래 {tx.transaction_id}")
-                        await process_deposit_confirmation(session, tx, amt, context)
-                        break
-    except Exception as e:
-        logging.error(f"자동 입금 확인 오류: {e}")
-    finally:
-        session.close()
+# 사용자 등록 함수 (봇과 대화한 사용자 기록)
+async def register_user(update: Update, context: CallbackContext) -> None:
+    if update.effective_user:
+        REGISTERED_USERS.add(update.effective_user.id)
+        logging.info(f"register_user: 사용자 {update.effective_user.id} 등록됨")
 
 # -------------------------------------------------------------------
 # 명령어 안내 함수 (관리자 명령어는 숨김; /exit 포함)
@@ -326,20 +262,19 @@ def command_guide() -> str:
 async def exit_to_start(update: Update, context: CallbackContext) -> int:
     if context.user_data.get("in_conversation"):
         await update.message.reply_text("현재 거래 진행 중에는 /exit를 사용할 수 없습니다. 거래를 완료하거나 취소해주세요.")
-        return  # 아무것도 리턴하지 않음
+        return
     logging.info("exit_to_start triggered")
     context.user_data.clear()
     await update.message.reply_text("대화가 초기화되었습니다.\n" + command_guide())
     return ConversationHandler.END
 
 # -------------------------------------------------------------------
-# 각 대화 흐름 진입 시 in_conversation 플래그 설정 및 종료 시 제거
+# 데코레이터: 대화 흐름 진입 시 플래그 설정
 def set_in_conversation(func):
     @wraps(func)
     async def wrapper(update: Update, context: CallbackContext, *args, **kwargs):
         context.user_data["in_conversation"] = True
         result = await func(update, context, *args, **kwargs)
-        # 정상 종료 시 플래그 제거 (ConversationHandler.END가 리턴되면)
         if result == ConversationHandler.END:
             context.user_data.pop("in_conversation", None)
         return result
