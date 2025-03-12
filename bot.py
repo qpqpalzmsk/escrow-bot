@@ -4,6 +4,7 @@ import os
 import requests
 from requests.adapters import HTTPAdapter, Retry
 from functools import wraps
+import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaDocument, InputMediaPhoto
 from telegram.ext import (
@@ -1075,7 +1076,7 @@ async def adminsearch_command(update: Update, context: CallbackContext) -> None:
 @check_banned
 async def ban_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
-        await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다.")
+        await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다." + command_guide())
         return
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -1092,7 +1093,7 @@ async def ban_command(update: Update, context: CallbackContext) -> None:
 @check_banned
 async def unban_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
-        await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다.")
+        await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다." + command_guide())
         return
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -1112,7 +1113,7 @@ async def unban_command(update: Update, context: CallbackContext) -> None:
 @check_banned
 async def post_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
-        await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다.")
+        await update.message.reply_text("관리자만 사용할 수 있는 명령어입니다." + command_guide())
         return
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -1132,8 +1133,6 @@ async def post_command(update: Update, context: CallbackContext) -> None:
 
 # -------------------------------------------------------------------
 # 대화형 핸들러
-from telegram.ext import ConversationHandler
-
 sell_handler = ConversationHandler(
     entry_points=[CommandHandler("sell", sell_command)],
     states={
@@ -1181,13 +1180,8 @@ refund_handler = ConversationHandler(
 )
 
 # -------------------------------------------------------------------
-# 메인 실행
+# 메인 실행 (헬스체크 서버와 텔레그램 폴링을 동시에 실행)
 def main():
-    """
-    Fly.io 환경에서 제대로 작동하도록:
-    1) Webhook 제거 후 (deleteWebhook) 
-    2) run_polling() 으로 getUpdates 폴링
-    """
     if not TELEGRAM_API_KEY:
         logging.error("TELEGRAM_API_KEY is empty! Check fly.io secrets.")
         return
@@ -1242,8 +1236,32 @@ def main():
     # 자동 입금 확인 (async 함수)
     app.job_queue.run_repeating(auto_verify_deposits, interval=60, first=10)
 
-    # ** 폴링 실행 ** (동기)
-    app.run_polling()
+    # --- 두 작업(텔레그램 폴링, 헬스체크 서버)을 동시에 실행 ---
+    async def run_bot():
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+        await app.updater.idle()
+
+    async def run_health():
+        from aiohttp import web
+        async def health(request):
+            return web.Response(text="OK")
+        health_app = web.Application()
+        health_app.router.add_get("/", health)
+        port = int(os.environ.get("PORT", "8080"))
+        runner = web.AppRunner(health_app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        logging.info(f"Health server started on port {port}")
+        while True:
+            await asyncio.sleep(3600)
+
+    async def main_async():
+        await asyncio.gather(run_bot(), run_health())
+
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
