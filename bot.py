@@ -35,7 +35,7 @@ logging.basicConfig(
 # 환경 변수 / 전역 변수
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")  # 봇 토큰 (필수)
 DATABASE_URL = os.getenv("DATABASE_URL")          # 예: "postgres://user:pass@host:5432/dbname"
-# DATABASE_URL가 "postgres://"로 시작하면 "postgresql://"로 변경
+# DATABASE_URL가 "postgres://"로 시작하면 "postgresql://"로 변경 (SQLAlchemy에서는 "postgresql://"를 사용)
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -72,7 +72,6 @@ engine = create_engine(
     pool_pre_ping=True,
 )
 SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
-
 Base = declarative_base()
 
 def get_db_session():
@@ -323,7 +322,6 @@ async def register_user(update: Update, context: CallbackContext) -> None:
     if update.effective_user:
         REGISTERED_USERS.add(update.effective_user.id)
 
-# -------------------------------------------------------------------
 def command_guide() -> str:
     return (
         "\n\n사용 가능한 명령어:\n"
@@ -623,9 +621,7 @@ async def cancel_item(update: Update, context: CallbackContext) -> int:
             item = session.query(Item).filter_by(id=item_id, seller_id=seller_id, status="available").first()
         else:
             try:
-                item = session.query(Item).filter_by(
-                    id=int(identifier), seller_id=seller_id, status="available"
-                ).first()
+                item = session.query(Item).filter_by(id=int(identifier), seller_id=seller_id, status="available").first()
             except ValueError:
                 item = session.query(Item).filter(
                     Item.name.ilike(f"%{identifier}%"),
@@ -809,7 +805,7 @@ async def confirm_payment(update: Update, context: CallbackContext) -> None:
                     f"거래 ID {t_id}가 최종 완료되었습니다.\n"
                     f"{net_amount} USDT가 판매자 지갑({seller_wallet})으로 송금되었습니다.\n"
                     f"송금 결과: {result}\n구매자님, 물품 수령 후 확인 부탁드립니다!"
-                )
+                ),
             )
         except Exception as e:
             logging.error(f"판매자 송금 오류: {e}")
@@ -1016,7 +1012,7 @@ async def process_refund(update: Update, context: CallbackContext) -> int:
         return WAITING_FOR_REFUND_WALLET
 
 # -------------------------------------------------------------------
-# 관리자 전용
+# 관리자 전용 명령어
 @check_banned
 async def warexit_command(update: Update, context: CallbackContext) -> None:
     if update.message.from_user.id != ADMIN_TELEGRAM_ID:
@@ -1105,7 +1101,7 @@ async def unban_command(update: Update, context: CallbackContext) -> None:
         BANNED_USERS.remove(unban_id)
         await update.message.reply_text(f"텔레그램 ID {unban_id} 차단 해제 완료.")
     else:
-        await update.message.reply_text(f"텔레그램 ID {unban_id} 은(는) 차단 목록에 없습니다.")
+        await update.message.reply_text(f"텔레그램 ID {unban_id}은(는) 차단 목록에 없습니다.")
 
 @check_banned
 async def post_command(update: Update, context: CallbackContext) -> None:
