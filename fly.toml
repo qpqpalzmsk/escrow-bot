@@ -1,4 +1,1 @@
-app = "escrow-bot"            # Fly.io 앱 이름 (fly apps create 시 만든 이름)
-
-[build]
-  dockerfile = "Dockerfile"
+app = "escrow-bot"
