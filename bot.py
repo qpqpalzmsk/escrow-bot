@@ -17,6 +17,8 @@ from telegram.ext import (
     filters,
     CallbackContext,
     ContextTypes,
+    # idle 함수 (manual init에서 사용)
+    idle
 )
 from telegram.constants import ParseMode
 
@@ -38,10 +40,10 @@ logging.basicConfig(
 # -------------------------------------------------------------------
 # 환경 변수 / 전역 변수
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")  # 봇 토큰 (필수)
-DATABASE_URL = os.getenv("DATABASE_URL")          # "postgresql://user:pwd@host:port/dbname" 형태
+DATABASE_URL = os.getenv("DATABASE_URL")          # ex: "postgresql://user:pass@host:port/dbname"
 TRON_API = os.getenv("TRON_API") or "https://api.trongrid.io"
 TRON_API_KEY = os.getenv("TRON_API_KEY") or ""
-TRON_WALLET = "TT8AZ3dCpgWJQSw9EXhhyR3uKj81jXxbRB"
+TRON_WALLET = "TT8AZ3dCpgWJQSw9EXhhyR3uKj81jXxbRB"  # 예시 지갑
 PRIVATE_KEY = os.getenv("PRIVATE_KEY") or ""
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "999999999"))
 USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
@@ -64,9 +66,6 @@ http_session.mount("http://", http_adapter)
 
 # -------------------------------------------------------------------
 # SQLAlchemy 설정
-if not DATABASE_URL:
-    logging.error("DATABASE_URL is not set. Please provide a valid PostgreSQL connection URL.")
-    # 여기서 바로 종료해도 되지만, 일단 진행
 engine = create_engine(
     DATABASE_URL,
     echo=True,
@@ -112,7 +111,7 @@ class Rating(Base):
     review = Column(Text)
     created_at = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
 
-# 스키마 생성 (테이블 없으면 새로 만듦)
+# 테이블 생성 (존재하지 않으면 새로 만듦)
 Base.metadata.create_all(bind=engine)
 
 # -------------------------------------------------------------------
@@ -120,9 +119,9 @@ Base.metadata.create_all(bind=engine)
 client = Tron(provider=HTTPProvider(TRON_API, api_key=TRON_API_KEY))
 
 # -------------------------------------------------------------------
-# 트랜잭션 검증/송금 함수들
+# 블록체인 입출금 관련 함수들
 def verify_deposit_txid(expected_amount: float, txid: str) -> (bool, float):
-    """txid로 단순 입금 검증 (메모 불문)"""
+    """txid 검증 (메모 불문)"""
     try:
         if txid in USED_TXIDS:
             logging.error(f"txid {txid}는 이미 사용되었습니다.")
@@ -139,7 +138,7 @@ def verify_deposit_txid(expected_amount: float, txid: str) -> (bool, float):
         return (False, 0)
 
 def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
-    """TRC20 전송 (blocking)"""
+    """TRC20 송금 (동기)"""
     try:
         contract = client.get_contract(USDT_CONTRACT)
         data = memo.encode("utf-8").hex() if memo else ""
@@ -179,6 +178,7 @@ def fetch_recent_trc20_transactions(address: str, limit: int = 50) -> list:
         return []
 
 def parse_trc20_transaction(tx_info: dict) -> (float, str):
+    """TRC20 거래에서 amount, memo 추출"""
     try:
         raw_amount = tx_info.get("value", "0")
         amount_float = float(raw_amount) / 1e6
@@ -192,7 +192,7 @@ def parse_trc20_transaction(tx_info: dict) -> (float, str):
     return amount_float, memo_str
 
 # -------------------------------------------------------------------
-# 자동 입금 확인 (JobQueue에서 반복 호출)
+# 자동 입금 확인 (JobQueue에서 일정 주기로 호출)
 async def auto_verify_deposits(context: ContextTypes.DEFAULT_TYPE):
     session = get_db_session()
     try:
@@ -209,30 +209,31 @@ async def auto_verify_deposits(context: ContextTypes.DEFAULT_TYPE):
             parsed[tx_id] = (amt, memo)
         for tx in accepted_txs:
             for tx_id, (amt, memo) in parsed.items():
-                # 메모에 거래 ID가 포함되어 있으면 매칭
+                # 메모 필드에 거래 ID가 들어 있는지 확인
                 if tx.transaction_id.lower() in memo.lower():
                     if amt >= float(tx.amount):
-                        # 입금액이 충분하므로 상태 업데이트
                         USED_TXIDS.add(tx_id)
                         tx.status = "deposit_confirmed"
                         session.commit()
+                        # 알림
                         try:
                             await context.bot.send_message(
                                 chat_id=tx.buyer_id,
                                 text=(
-                                    f"자동 입금 확인되었습니다. (거래 ID {tx.transaction_id}, {amt} USDT)\n"
-                                    "판매자님께 물품 발송을 요청해주세요. 발송 후 /confirm을 통해 최종 거래 완료."
+                                    f"[자동 입금 확인] 거래ID {tx.transaction_id}, 금액 {amt} USDT.\n"
+                                    f"판매자에게 물품 발송을 요청해 주세요.\n"
+                                    "발송 후 /confirm 명령어로 최종 거래를 완료하세요."
                                 )
                             )
                             await context.bot.send_message(
                                 chat_id=tx.seller_id,
                                 text=(
-                                    f"자동 입금 확인되었습니다. (거래 ID {tx.transaction_id}, {amt} USDT)\n"
+                                    f"[자동 입금 확인] 거래ID {tx.transaction_id}, 금액 {amt} USDT.\n"
                                     "구매자에게 물품 발송을 진행해주세요."
                                 )
                             )
                         except Exception as e:
-                            logging.error(f"자동 입금 확인 후 알림 오류: {e}")
+                            logging.error(f"자동 입금 확인 후 알림 실패: {e}")
                         break
     except Exception as e:
         logging.error(f"자동 입금 확인 오류: {e}")
@@ -269,7 +270,7 @@ def check_banned(func):
     return wrapper
 
 # -------------------------------------------------------------------
-# 사용자 등록 (모든 메시지 그룹 0에서 처리)
+# 모든 메시지에서 사용자 등록
 @check_banned
 async def register_user(update: Update, context: CallbackContext) -> None:
     if update.effective_user:
@@ -295,7 +296,7 @@ def command_guide() -> str:
     )
 
 # -------------------------------------------------------------------
-# 명령어들
+# 명령어 핸들러들
 @check_banned
 async def start_command(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text("에스크로 거래 봇에 오신 것을 환영합니다!\n" + command_guide())
@@ -450,6 +451,7 @@ async def offer_item(update: Update, context: CallbackContext) -> None:
             return
         identifier = args[1].strip()
         mapping = context.user_data.get("list_mapping") or context.user_data.get("search_mapping") or {}
+        item = None
         if identifier in mapping:
             item_id = mapping[identifier]
             item = session.query(Item).filter_by(id=item_id, status="available").first()
@@ -546,6 +548,7 @@ async def cancel_item(update: Update, context: CallbackContext) -> int:
         identifier = update.message.text.strip()
         seller_id = update.message.from_user.id
         mapping = context.user_data.get("cancel_mapping") or {}
+        item = None
         if identifier in mapping:
             item_id = mapping[identifier]
             item = session.query(Item).filter_by(id=item_id, seller_id=seller_id, status="available").first()
@@ -582,7 +585,6 @@ async def accept_transaction(update: Update, context: CallbackContext) -> None:
         return
     t_id = args[1].strip()
     seller_wallet = args[2].strip()
-    # Tron 지갑 주소는 대체로 'T'로 시작
     if not seller_wallet.startswith("T"):
         await update.message.reply_text("유효한 판매자 지갑 주소를 입력해주세요." + command_guide())
         return
@@ -603,8 +605,9 @@ async def accept_transaction(update: Update, context: CallbackContext) -> None:
             await context.bot.send_message(
                 chat_id=tx.buyer_id,
                 text=(
-                    f"거래 ID {t_id}가 수락되었습니다.\n해당 금액({tx.amount} USDT)를 {TRON_WALLET} 로 송금하실 때, "
-                    f"메모(거래ID: {t_id})를 꼭 기입해 주세요."
+                    f"거래 ID {t_id}가 수락되었습니다.\n"
+                    f"해당 금액({tx.amount} USDT)를 {TRON_WALLET} 로 송금하실 때,\n"
+                    f"메모(거래ID: {t_id})를 꼭 입력해 주세요."
                 )
             )
         except Exception as e:
@@ -727,9 +730,9 @@ async def confirm_payment(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text(
             f"입금이 최종 확인되었습니다 ({original_amount} USDT). 판매자에게 {net_amount} USDT 송금합니다..." + command_guide()
         )
+        # 비동기 스레드로 블로킹 송금
         try:
             seller_wallet = tx.session_id
-            # 블로킹 I/O를 비동기 실행
             result = await asyncio.to_thread(send_usdt, seller_wallet, net_amount, memo=t_id)
             await context.bot.send_message(
                 chat_id=tx.seller_id,
@@ -829,7 +832,6 @@ async def start_chat(update: Update, context: CallbackContext) -> None:
 
 @check_banned
 async def relay_message(update: Update, context: CallbackContext) -> None:
-    """채팅 모드에서 파일/문자 메시지를 상대방에게 중계"""
     t_id = context.user_data.get("current_chat_tx")
     if not t_id or t_id not in active_chats:
         return
@@ -894,14 +896,14 @@ async def refund_request(update: Update, context: CallbackContext) -> int:
     try:
         tx = session.query(Transaction).filter_by(transaction_id=t_id, status="deposit_confirmed_over").first()
         if not tx:
-            await update.message.reply_text("유효한 거래 ID가 아니거나 환불 요청이 불가능한 상태입니다." + command_guide())
+            await update.message.reply_text("유효한 거래 ID가 아니거나 환불 요청이 불가능합니다." + command_guide())
             return ConversationHandler.END
         if update.message.from_user.id != tx.buyer_id:
             await update.message.reply_text("구매자만 환불 요청이 가능합니다." + command_guide())
             return ConversationHandler.END
-        # 예시 로직: 초과 입금 시 환불
         expected_amount = float(tx.amount)
-        refund_amount = expected_amount * (1 - (NORMAL_COMMISSION_RATE / 2))  # 2.5% 수수료 가정
+        # 초과 송금 상황이라 가정, 간단 수수료 계산
+        refund_amount = expected_amount * (1 - (NORMAL_COMMISSION_RATE / 2))  # 예: 2.5% 수수료
         context.user_data["refund_txid"] = t_id
         context.user_data["refund_amount"] = refund_amount
         await update.message.reply_text(
@@ -1087,31 +1089,30 @@ refund_handler = ConversationHandler(
 )
 
 # -------------------------------------------------------------------
-# 메인 함수 (v20 기준)
+# 메인 실행 함수 (Manual Initialization 방식)
 def main():
     if not TELEGRAM_API_KEY:
-        logging.error("TELEGRAM_API_KEY is empty! Set your TELEGRAM_API_KEY as an environment variable.")
+        logging.error("TELEGRAM_API_KEY is not set!")
         return
 
-    # Webhook 사용 안 할 경우, 기존 webhook 제거 (선택사항)
+    # (선택) 이전 Webhook 제거
     try:
         resp = requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_API_KEY}/deleteWebhook?drop_pending_updates=true", timeout=10
+            f"https://api.telegram.org/bot{TELEGRAM_API_KEY}/deleteWebhook?drop_pending_updates=true", 
+            timeout=10
         )
         logging.info(f"deleteWebhook response: {resp.status_code}, {resp.text}")
     except Exception as e:
         logging.error(f"deleteWebhook error: {e}")
 
-    # ApplicationBuilder (v20)
+    # v20.x ApplicationBuilder
     app = ApplicationBuilder().token(TELEGRAM_API_KEY).build()
-
-    # 에러 핸들러 등록
     app.add_error_handler(error_handler)
 
-    # 그룹 0에서 모든 메시지로 register_user 실행
+    # 그룹 0: 모든 메시지로 register_user 실행
     app.add_handler(MessageHandler(filters.ALL, register_user), group=0)
 
-    # 주요 명령어/핸들러
+    # 주요 명령어
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("list", list_items_command))
     app.add_handler(CommandHandler("next", next_page))
@@ -1141,21 +1142,18 @@ def main():
     app.add_handler(rate_handler)
     app.add_handler(refund_handler)
 
-    # 채팅 메시지 중계 핸들러 (command 제외 모든 메시지)
+    # 채팅 메시지 중계 핸들러 (command 제외)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 
-    # JobQueue 사용: 60초마다 auto_verify_deposits 실행
+    # JobQueue (자동 입금 확인)
     app.job_queue.run_repeating(auto_verify_deposits, interval=60, first=10)
 
-    # 이제 run_polling으로 실행 (v20 방식)
-    async def run_async():
-        await app.run_polling()
-
-    # Fly.io에서 동시에 헬스 체크 서버 띄우기
-    async def run_health():
+    async def main_async():
+        # 헬스체크 서버 (동일 이벤트 루프)
         from aiohttp import web
         async def health(request):
             return web.Response(text="OK")
+
         health_app = web.Application()
         health_app.router.add_get("/", health)
         port = int(os.environ.get("PORT", "8080"))
@@ -1164,12 +1162,20 @@ def main():
         site = web.TCPSite(runner, "0.0.0.0", port)
         await site.start()
         logging.info(f"Health server started on port {port}")
-        while True:
-            await asyncio.sleep(3600)
 
-    async def main_async():
-        await asyncio.gather(run_async(), run_health())
+        # Manual Init
+        await app.initialize()  # Dispatcher, Bot 등 초기화
+        await app.start()       # 실제 봇 연결
+        app.job_queue.start()   # JobQueue 시작
 
+        # idle()는 asyncio 이벤트 루프를 유지하면서 Ctrl+C 등에서 종료를 기다림
+        await idle()
+
+        # 앱 정리
+        await app.stop()
+        # app.job_queue.stop()  # 필요하다면
+
+    # 이미 asyncio 이벤트 루프가 도는 상황이 아님 → 직접 실행
     asyncio.run(main_async())
 
 if __name__ == "__main__":
