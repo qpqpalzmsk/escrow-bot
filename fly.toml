@@ -1,29 +1,4 @@
 app = "escrow-bot"            # Fly.io 앱 이름 (fly apps create 시 만든 이름)
 
-kill_signal = "SIGINT"
-kill_timeout = 5
-
 [build]
   dockerfile = "Dockerfile"
-
-[env]
-  # Dockerfile에서 이미 ENV PORT=8080 이라면 생략 가능
-  PORT = "8080"
-
-[[services]]
-  processes = ["app"]
-  internal_port = 8080
-  protocol = "tcp"
-
-  [services.concurrency]
-    type = "connections"
-    hard_limit = 25
-    soft_limit = 20
-
-  [[services.ports]]
-    port = 80
-    handlers = ["http"]
-
-  [[services.ports]]
-    port = 443
-    handlers = ["tls","http"]
