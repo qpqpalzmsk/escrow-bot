@@ -2,6 +2,6 @@ python-telegram-bot[job-queue]==20.3
 SQLAlchemy==2.0.19
 tronpy==0.5.0
 requests==2.31.0
-aiohttp==3.8.5
+aiohttp
 psycopg2-binary==2.9.6
-httpx==0.23.1
+httpx
