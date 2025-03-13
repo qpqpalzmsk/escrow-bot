@@ -1,13 +1,13 @@
-# 1. 베이스 이미지
+# Python 3.11 slim 이미지 사용
 FROM python:3.11-slim
 
-# 2. 작업 디렉토리
+# 작업 디렉터리 설정
 WORKDIR /app
 
-# 3. requirements.txt 먼저 복사
+# requirements.txt 먼저 복사
 COPY requirements.txt .
 
-# 4. C라이브러리/라이브pq-dev + pip 설치
+# slim 이미지에서 psycopg2-binary 설치를 위해 gcc, libpq-dev 필요
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
@@ -15,10 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && pip install --no-cache-dir --upgrade pip \
   && pip install --no-cache-dir -r requirements.txt
 
-# 5. 이제 bot.py 복사
-COPY bot.py .
+# 나머지 코드 (bot.py 등) 복사
+COPY . .
 
-# Fly.io는 PORT=8080 기준
+# Fly.io에서 PORT=8080 (사실 Polling만 해도 프로세스가 안 죽지만 예시로 설정)
 ENV PORT=8080
 
+# 컨테이너 실행 시 bot.py 실행
 CMD ["python", "bot.py"]
