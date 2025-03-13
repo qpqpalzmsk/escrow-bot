@@ -1,23 +1,29 @@
-# fly.toml app configuration file generated for escrow-bot on 2025-03-13T11:27:22Z
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
+app = "escrow-bot"
 
-app = 'escrow-bot'
-primary_region = 'nrt'
+kill_signal = "SIGINT"
+kill_timeout = 5
 
-[build]
+[experimental]
+  auto_rollback = true
 
-[http_service]
+[[services]]
+  # 내부 포트는 봇이 polling 방식이라 크게 중요하지 않으나, health check 등을 위해 필요합니다.
   internal_port = 8080
-  force_https = true
-  auto_stop_machines = 'stop'
-  auto_start_machines = true
-  min_machines_running = 0
-  processes = ['app']
+  protocol = "tcp"
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+  [services.concurrency]
+    type = "connections"
+    soft_limit = 50      # 증가된 동시 연결 제한
+    hard_limit = 60
 
-[[vm]]
-  memory = '1gb'
-  cpu_kind = 'shared'
-  cpus = 1
-  memory_mb = 1024
+[env]
+  # 필요한 환경 변수들은 여기에서 설정할 수 있습니다.
+  # 예: DATABASE_URL, TELEGRAM_API_KEY 등 (보안상 시크릿으로 관리하세요)
+
+[resources]
+  # 이 부분에서 할당할 리소스를 조정합니다.
+  # 예를 들어, dedicated CPU와 2GB 메모리를 할당합니다.
+  cpu = "dedicated"
+  memory = "2GB"
