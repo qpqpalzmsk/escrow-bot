@@ -1,1 +1,4 @@
 app = "escrow-bot"
+
+[build]
+dockerfile = "Dockerfile"
