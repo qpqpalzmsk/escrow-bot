@@ -211,26 +211,10 @@ def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
         raise
 
 # ==============================
-# 8) 자동 입금 확인 (별도 스케줄러로 실행하려면 APScheduler 등 사용)
-async def auto_verify_deposits(context: CallbackContext):
-    session = get_db_session()
-    try:
-        pending_list = session.query(Transaction).filter_by(status="accepted").all()
-        if pending_list:
-            logging.info(f"[auto_verify] Found {len(pending_list)} accepted transactions to check.")
-        for tx in pending_list:
-            # 실제로 TronGrid 조회해서 입금 확인 → 예: tx.status = 'deposit_confirmed'
-            pass
-    except Exception as e:
-        logging.error(f"auto_verify_deposits 오류: {e}")
-    finally:
-        session.close()
-
-# ==============================
-# 9) 로깅
+# 8) 로깅 설정
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# 대화 상태
+# 대화 상태 상수
 (WAITING_FOR_ITEM_NAME,
  WAITING_FOR_PRICE,
  WAITING_FOR_ITEM_TYPE,
@@ -480,6 +464,7 @@ async def offer_item(update: Update, context: CallbackContext) -> None:
             item_id = mapping[identifier]
             item = session.query(Item).filter_by(id=item_id, status="available").first()
         else:
+            # 이름/번호 검색
             try:
                 item_id_int = int(identifier)
                 item = session.query(Item).filter_by(id=item_id_int, status="available").first()
@@ -713,7 +698,7 @@ async def check_deposit(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text("입금 확인됨. 안내 메시지 전송.\n" + command_guide())
         await context.bot.send_message(
             chat_id=tx.seller_id,
-            text=(f"거래 ID {t_id} 입금 확인됨.\n/confirm 으로 거래완료 진행.")
+            text=(f"거래 ID {t_id} 입금 확인됨.\n상품 발송 후 /confirm 으로 거래 완료 진행.")
         )
     except Exception as e:
         session.rollback()
@@ -1114,7 +1099,7 @@ def main():
         logging.error("TELEGRAM_API_KEY가 설정되지 않았습니다!")
         return
 
-    # 먼저 DB 연결 확인 (Dialect/psycopg2 문제 등)
+    # 먼저 DB 연결 확인 (Dialect 문제나 psycopg2 미설치 시 에러 발생)
     try:
         from sqlalchemy import text
         with engine.connect() as conn:
@@ -1132,7 +1117,7 @@ def main():
     # 에러 핸들러
     app.add_error_handler(error_handler)
 
-    # (group=0) 모든 메시지 → register_user
+    # 모든 메시지 → register_user (group=0)
     app.add_handler(MessageHandler(filters.ALL, register_user), group=0)
 
     # 주요 명령어 핸들러
@@ -1168,7 +1153,7 @@ def main():
     # 파일/메시지 중계 (채팅)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 
-    # PTB JobQueue 관련 스케줄링은 이번 버전에서 제거(따로 APScheduler 등 별도 스케줄러 사용 필요)
+    # JobQueue 관련 코드는 제거됨
 
     # 봇 실행 (Polling)
     app.run_polling()
