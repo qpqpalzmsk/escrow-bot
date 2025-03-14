@@ -211,7 +211,7 @@ def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
         raise
 
 # ==============================
-# 8) auto_verify_deposits (JobQueue)
+# 8) 자동 입금 확인 (별도 스케줄러로 실행하려면 APScheduler 등 사용)
 async def auto_verify_deposits(context: CallbackContext):
     session = get_db_session()
     try:
@@ -219,7 +219,7 @@ async def auto_verify_deposits(context: CallbackContext):
         if pending_list:
             logging.info(f"[auto_verify] Found {len(pending_list)} accepted transactions to check.")
         for tx in pending_list:
-            # 실제로 TronGrid 조회해서 입금 확인 → status='deposit_confirmed' 등
+            # 실제로 TronGrid 조회해서 입금 확인 → 예: tx.status = 'deposit_confirmed'
             pass
     except Exception as e:
         logging.error(f"auto_verify_deposits 오류: {e}")
@@ -480,7 +480,6 @@ async def offer_item(update: Update, context: CallbackContext) -> None:
             item_id = mapping[identifier]
             item = session.query(Item).filter_by(id=item_id, status="available").first()
         else:
-            # 이름/번호 검색
             try:
                 item_id_int = int(identifier)
                 item = session.query(Item).filter_by(id=item_id_int, status="available").first()
@@ -934,11 +933,7 @@ async def relay_message(update: Update, context: CallbackContext) -> None:
         return
     buyer_id, seller_id = active_chats[t_id]
     sender = update.message.from_user.id
-    partner = None
-    if sender == buyer_id:
-        partner = seller_id
-    elif sender == seller_id:
-        partner = buyer_id
+    partner = seller_id if sender == buyer_id else buyer_id if sender == seller_id else None
     if not partner:
         return
     try:
@@ -1119,7 +1114,7 @@ def main():
         logging.error("TELEGRAM_API_KEY가 설정되지 않았습니다!")
         return
 
-    # 먼저 DB 연결이 되는지 간단히 확인 (Dialect 문제나 psycopg2 미설치면 여기서 에러)
+    # 먼저 DB 연결 확인 (Dialect/psycopg2 문제 등)
     try:
         from sqlalchemy import text
         with engine.connect() as conn:
@@ -1128,7 +1123,7 @@ def main():
         logging.error("데이터베이스 연결 오류(Dialect/psycopg2 등): %s", e)
         return  # 즉시 종료
 
-    # Webhook 해제(Polling 사용)
+    # Webhook 해제 (Polling 사용)
     remove_webhook(TELEGRAM_API_KEY)
 
     # Telegram App 준비
@@ -1173,8 +1168,7 @@ def main():
     # 파일/메시지 중계 (채팅)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 
-    # 자동 입금 확인 (JobQueue)
-    app.job_queue.run_repeating(auto_verify_deposits, interval=60, first=10)
+    # PTB JobQueue 관련 스케줄링은 이번 버전에서 제거(따로 APScheduler 등 별도 스케줄러 사용 필요)
 
     # 봇 실행 (Polling)
     app.run_polling()
