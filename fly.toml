@@ -1,4 +1,7 @@
-app = escrow-bot
+app = "escrow-bot"
+
+[machines]
+count = 1
 
 [build]
 dockerfile = "Dockerfile"
