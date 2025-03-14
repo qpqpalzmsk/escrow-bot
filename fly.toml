@@ -1,4 +1,6 @@
-app = "escrow-bot"
+[app]
+count = 1
+name = "escrow-bot"
 
 [build]
 dockerfile = "Dockerfile"

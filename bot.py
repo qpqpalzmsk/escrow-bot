@@ -37,8 +37,8 @@ from sqlalchemy import (
     TIMESTAMP,
     text
 )
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, scoped_session
+# SQLAlchemy 2.0 권장: sqlalchemy.orm.declarative_base 사용
+from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
 
 # Tronpy
 from tronpy import Tron
@@ -125,7 +125,7 @@ NORMAL_COMMISSION_RATE = 0.05
 OVERSEND_COMMISSION_RATE = 0.075
 
 # ==============================
-# 6) Webhook 해제 → Polling
+# 6) Webhook 해제 → Polling 사용 (getUpdates 방식)
 def remove_webhook(token: str):
     try:
         resp = requests.get(f"https://api.telegram.org/bot{token}/deleteWebhook?drop_pending_updates=true", timeout=10)
@@ -211,6 +211,8 @@ def send_usdt(to_address: str, amount: float, memo: str = "") -> dict:
         raise
 
 # ==============================
+# (자동 입금 확인 기능은 제거되었습니다. 수동으로 /checkdeposit 명령어를 사용하세요.)
+# ==============================
 # 8) 로깅 설정
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
@@ -226,7 +228,7 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 ITEMS_PER_PAGE = 10
 active_chats = {}
 
-BANNED_USERS = set()  # ban/unban 목록
+BANNED_USERS = set()  # 차단된 사용자 ID 모음
 REGISTERED_USERS = set()
 
 # ==============================
@@ -464,7 +466,6 @@ async def offer_item(update: Update, context: CallbackContext) -> None:
             item_id = mapping[identifier]
             item = session.query(Item).filter_by(id=item_id, status="available").first()
         else:
-            # 이름/번호 검색
             try:
                 item_id_int = int(identifier)
                 item = session.query(Item).filter_by(id=item_id_int, status="available").first()
@@ -492,7 +493,7 @@ async def offer_item(update: Update, context: CallbackContext) -> None:
         session.commit()
 
         await update.message.reply_text(
-            f"'{item.name}' 거래 요청 생성!\n거래 ID: {t_id}\n(송금 시 메모필수)\n" + command_guide()
+            f"'{item.name}' 거래 요청 생성!\n거래 ID: {t_id}\n(송금 시 메모 필수)\n" + command_guide()
         )
         try:
             await context.bot.send_message(
@@ -698,7 +699,7 @@ async def check_deposit(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text("입금 확인됨. 안내 메시지 전송.\n" + command_guide())
         await context.bot.send_message(
             chat_id=tx.seller_id,
-            text=(f"거래 ID {t_id} 입금 확인됨.\n상품 발송 후 /confirm 으로 거래 완료 진행.")
+            text=(f"거래 ID {t_id} 입금 확인됨.\n판매자: 물품 발송 후 /confirm 명령어로 거래 완료 처리하세요.")
         )
     except Exception as e:
         session.rollback()
@@ -1099,28 +1100,28 @@ def main():
         logging.error("TELEGRAM_API_KEY가 설정되지 않았습니다!")
         return
 
-    # 먼저 DB 연결 확인 (Dialect 문제나 psycopg2 미설치 시 에러 발생)
+    # DB 연결 확인
     try:
         from sqlalchemy import text
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
     except Exception as e:
         logging.error("데이터베이스 연결 오류(Dialect/psycopg2 등): %s", e)
-        return  # 즉시 종료
+        return
 
     # Webhook 해제 (Polling 사용)
     remove_webhook(TELEGRAM_API_KEY)
 
-    # Telegram App 준비
+    # Telegram Application 준비 (JobQueue 관련 코드는 제거됨)
     app = ApplicationBuilder().token(TELEGRAM_API_KEY).build()
 
     # 에러 핸들러
     app.add_error_handler(error_handler)
 
-    # 모든 메시지 → register_user (group=0)
+    # 모든 메시지 핸들러 (등록)
     app.add_handler(MessageHandler(filters.ALL, register_user), group=0)
 
-    # 주요 명령어 핸들러
+    # 주요 명령어 핸들러 등록
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("list", list_items_command))
     app.add_handler(CommandHandler("next", next_page))
@@ -1133,14 +1134,14 @@ def main():
     app.add_handler(CommandHandler("confirm", confirm_payment))
     app.add_handler(CommandHandler("off", off_transaction))
 
-    # 관리자 명령
+    # 관리자 명령어
     app.add_handler(CommandHandler("warexit", warexit_command))
     app.add_handler(CommandHandler("adminsearch", adminsearch_command))
     app.add_handler(CommandHandler("post", post_command))
     app.add_handler(CommandHandler("ban", ban_command))
     app.add_handler(CommandHandler("unban", unban_command))
 
-    # 공통 명령
+    # 공통 명령어
     app.add_handler(CommandHandler("chat", start_chat))
     app.add_handler(CommandHandler("exit", exit_to_start))
 
@@ -1150,12 +1151,10 @@ def main():
     app.add_handler(rate_handler)
     app.add_handler(refund_handler)
 
-    # 파일/메시지 중계 (채팅)
+    # 파일/메시지 중계 핸들러
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 
-    # JobQueue 관련 코드는 제거됨
-
-    # 봇 실행 (Polling)
+    # 봇 실행 (Polling 방식)
     app.run_polling()
 
 if __name__ == "__main__":
