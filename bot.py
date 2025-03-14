@@ -165,7 +165,6 @@ def parse_trc20_transfer_amount_and_memo(tx_detail: dict) -> (float, str):
         return 0.0, ""
 
 def verify_deposit(expected_amount: float, txid: str, internal_txid: str) -> (bool, float):
-    # internal_txid = 거래ID(메모), txid= actual Tron transaction
     try:
         detail = fetch_transaction_detail(txid)
         actual_amount, memo = parse_trc20_transfer_amount_and_memo(detail)
@@ -179,7 +178,6 @@ def verify_deposit(expected_amount: float, txid: str, internal_txid: str) -> (bo
         return (False, 0)
 
 def check_usdt_payment(expected_amount: float, txid: str = "", internal_txid: str = "") -> (bool, float):
-    # 1) 정확 txid+메모 또는 2) 단순 USDT 잔액 check
     if txid and internal_txid:
         return verify_deposit(expected_amount, txid, internal_txid)
     try:
@@ -249,8 +247,6 @@ REGISTERED_USERS = set()
 
 # ==============================
 # ban 데코레이터
-from functools import wraps
-
 def check_banned(func):
     @wraps(func)
     async def wrapper(update: Update, context: CallbackContext, *args, **kwargs):
@@ -674,7 +670,7 @@ async def refusal_transaction(update: Update, context: CallbackContext) -> None:
             await update.message.reply_text("유효한 거래 ID가 아니거나 이미 처리됨.\n" + command_guide())
             return
         if update.message.from_user.id != tx.seller_id:
-            await update.message.reply_text("판매자만 가능.\n" + command_guide())
+            await update.message.reply_text("판매자만 사용 가능.\n" + command_guide())
             return
         session.delete(tx)
         session.commit()
@@ -1123,19 +1119,28 @@ def main():
         logging.error("TELEGRAM_API_KEY가 설정되지 않았습니다!")
         return
 
-    # 1) Webhook 해제
+    # 먼저 DB 연결이 되는지 간단히 확인 (Dialect 문제나 psycopg2 미설치면 여기서 에러)
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as e:
+        logging.error("데이터베이스 연결 오류(Dialect/psycopg2 등): %s", e)
+        return  # 즉시 종료
+
+    # Webhook 해제(Polling 사용)
     remove_webhook(TELEGRAM_API_KEY)
 
-    # 2) Application
+    # Telegram App 준비
     app = ApplicationBuilder().token(TELEGRAM_API_KEY).build()
 
-    # 3) 에러 핸들러
+    # 에러 핸들러
     app.add_error_handler(error_handler)
 
-    # 4) 모든 메시지 → register_user
+    # (group=0) 모든 메시지 → register_user
     app.add_handler(MessageHandler(filters.ALL, register_user), group=0)
 
-    # 5) 명령어 핸들러
+    # 주요 명령어 핸들러
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("list", list_items_command))
     app.add_handler(CommandHandler("next", next_page))
@@ -1148,30 +1153,30 @@ def main():
     app.add_handler(CommandHandler("confirm", confirm_payment))
     app.add_handler(CommandHandler("off", off_transaction))
 
-    # 관리자
+    # 관리자 명령
     app.add_handler(CommandHandler("warexit", warexit_command))
     app.add_handler(CommandHandler("adminsearch", adminsearch_command))
     app.add_handler(CommandHandler("post", post_command))
     app.add_handler(CommandHandler("ban", ban_command))
     app.add_handler(CommandHandler("unban", unban_command))
 
-    # 공통
+    # 공통 명령
     app.add_handler(CommandHandler("chat", start_chat))
     app.add_handler(CommandHandler("exit", exit_to_start))
 
-    # 6) ConversationHandlers
+    # ConversationHandlers
     app.add_handler(sell_handler)
     app.add_handler(cancel_handler)
     app.add_handler(rate_handler)
     app.add_handler(refund_handler)
 
-    # 7) 파일/메시지 중계 (채팅)
+    # 파일/메시지 중계 (채팅)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 
-    # 8) JobQueue로 auto_verify_deposits
+    # 자동 입금 확인 (JobQueue)
     app.job_queue.run_repeating(auto_verify_deposits, interval=60, first=10)
 
-    # 9) run_polling
+    # 봇 실행 (Polling)
     app.run_polling()
 
 if __name__ == "__main__":
